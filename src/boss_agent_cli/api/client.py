@@ -4,6 +4,7 @@ from typing import Any
 from boss_agent_cli.api import endpoints
 from boss_agent_cli.api._base_client import _BaseHttpClient
 from boss_agent_cli.api.httpx_helpers import make_client_registry
+from boss_agent_cli.api.zhipin_errors import classify_code_37, response_message
 
 # atexit safeguard: close any BossClient instances not explicitly closed
 _OPEN_CLIENTS, _close_open_clients = make_client_registry()
@@ -18,6 +19,14 @@ class AuthError(Exception):
 
 class AccountRiskError(Exception):
 	"""BOSS 直聘风控拦截（code 36）：检测到异常行为。"""
+
+	def __init__(self, message: str = "", is_cdp: bool = False):
+		self.is_cdp = is_cdp
+		super().__init__(message)
+
+
+class EnvironmentRiskError(Exception):
+	"""BOSS 直聘访问环境风控（code 37），不等同于登录过期。"""
 
 	def __init__(self, message: str = "", is_cdp: bool = False):
 		self.is_cdp = is_cdp
@@ -40,27 +49,75 @@ class BossClient(_BaseHttpClient):
 	def _unregister(self) -> None:
 		_OPEN_CLIENTS.discard(self)
 
+	def _should_refresh_token_response(self, data: dict[str, Any]) -> bool:
+		return data.get("code") == endpoints.CODE_STOKEN_EXPIRED and classify_code_37(data) == "token_expired"
+
 	# ── Browser request (high-risk ops) ──────────────────────────────
 
-	def _browser_request(self, method: str, url: str, *, params: dict[str, Any] | None = None, data: dict[str, Any] | None = None) -> dict[str, Any]:
-		result = self._get_browser().request(method, url, params=params, data=data)
+	def _browser_request(
+		self,
+		method: str,
+		url: str,
+		*,
+		params: dict[str, Any] | None = None,
+		data: dict[str, Any] | None = None,
+		browser_source: str | None = None,
+	) -> dict[str, Any]:
+		# 单次请求，不重试：浏览器通道的 stoken 由页面 JS 生成，force_refresh 拿不到新凭证，
+		# 重试只是对已被风控拦截的高风险端点再打一次（见 docs/research/platforms/zhipin.md 红线）。
+		browser = self._get_browser(browser_source=browser_source)
+		result = browser.request(method, url, params=params, data=data)
 		code = result.get("code")
+		is_cdp = getattr(browser, "_is_cdp", False)
+		mode = "CDP" if is_cdp else ("Bridge" if getattr(browser, "_is_bridge", False) else "headless patchright")
 		if code == endpoints.CODE_ACCOUNT_RISK:
-			msg = result.get("message", "账户存在异常行为")
-			browser = self._get_browser()
-			is_cdp = getattr(browser, "_is_cdp", False)
-			mode = "CDP" if is_cdp else ("Bridge" if getattr(browser, "_is_bridge", False) else "headless patchright")
+			msg = response_message(result) or "账户存在异常行为"
 			raise AccountRiskError(
 				f"BOSS 直聘风控拦截 (code {code}): {msg}。"
 				f"当前浏览器模式: {mode}。"
 				f"建议：停止自动化访问并回到 BOSS 直聘官方页面手动处理。",
 				is_cdp=is_cdp,
 			)
+		if code == endpoints.CODE_STOKEN_EXPIRED and classify_code_37(result) == "environment_risk":
+			msg = response_message(result) or "未知 code 37 响应"
+			raise EnvironmentRiskError(
+				f"BOSS 直聘访问环境风控 (code {code}): {msg}。"
+				f"当前浏览器模式: {mode}。已停止且未刷新或重试；"
+				"请保留当前专用 profile，在官方页面确认后降低访问频率。",
+				is_cdp=is_cdp,
+			)
 		return result
+
+	@staticmethod
+	def _bridge_is_connected() -> bool:
+		"""Treat an attached extension as slice 1's existing-browser intent."""
+		from boss_agent_cli.bridge.client import BridgeClient
+
+		status = BridgeClient().status()
+		return bool(status and status.get("extensionConnected"))
+
+	def _read_request(self, method: str, url: str, **kwargs: Any) -> dict[str, Any]:
+		"""Use an existing browser only when explicitly configured or Bridge is connected.
+
+		The normal no-Bridge path keeps the established httpx semantics, including
+		``AUTH_REQUIRED + boss login`` when no stored token exists. The browser path
+		does not inherit httpx's stoken refresh/rate-limit retry loop; it is selected
+		only for these user-triggered read calls.
+		"""
+		from boss_agent_cli.api.browser_source import resolve_policy
+
+		configured = resolve_policy(self._browser_source)
+		if configured.name != "auto":
+			return self._browser_request(method, url, browser_source=configured.name, **kwargs)
+		if self._bridge_is_connected():
+			return self._browser_request(method, url, browser_source="existing-browser", **kwargs)
+		return self._request(method, url, **kwargs)
 
 	# ── Public API ───────────────────────────────────────────────────
 	# High-risk: search, recommend, greet, job_card → browser channel
-	# Low-risk: status, me, cities, schema, detail → httpx channel
+	# Low-risk: status, me, cities, schema, detail → httpx channel.
+	# friend_list/chat_history select an attached existing-browser read channel
+	# when Bridge is connected; otherwise they retain the httpx retry semantics.
 
 	def search_jobs(self, query: str, **filters: Any) -> dict[str, Any]:
 		params: dict[str, Any] = {"query": query, "page": filters.get("page", 1)}
@@ -137,6 +194,16 @@ class BossClient(_BaseHttpClient):
 		params = {"securityId": security_id, "lid": lid}
 		return self._request("GET", endpoints.JOB_CARD_URL, params=params)
 
+	def job_card_browser(self, security_id: str, lid: str = "") -> dict[str, Any]:
+		"""经浏览器通道获取职位卡片信息（强制浏览器，不走 httpx）。
+
+		与 job_card() 的区别：job_card() httpx 优先，仅 httpx 抛异常才降级浏览器；
+		而部分失败以响应字典返回时不抛异常，导致 httpx 通道拿不到完整 JD。
+		job_card_browser() 跳过 httpx，直接走浏览器通道。
+		"""
+		params = {"securityId": security_id, "lid": lid}
+		return self._browser_request("GET", endpoints.JOB_CARD_URL, params=params)
+
 	# ── Low-risk: httpx channel ──────────────────────────────────────
 
 	def job_detail(self, job_id: str) -> dict[str, Any]:
@@ -163,7 +230,7 @@ class BossClient(_BaseHttpClient):
 
 	def friend_list(self, page: int = 1) -> dict[str, Any]:
 		params = {"page": page}
-		return self._request("GET", endpoints.FRIEND_LIST_URL, params=params)
+		return self._read_request("GET", endpoints.FRIEND_LIST_URL, params=params)
 
 	def interview_data(self) -> dict[str, Any]:
 		return self._request("GET", endpoints.INTERVIEW_DATA_URL)
@@ -175,7 +242,7 @@ class BossClient(_BaseHttpClient):
 	def chat_history(self, gid: str, security_id: str, *, page: int = 1, count: int = 20) -> dict[str, Any]:
 		"""获取与指定好友的聊天消息历史。"""
 		params = {"gid": gid, "securityId": security_id, "page": page, "c": count, "src": 0}
-		return self._request("GET", endpoints.CHAT_HISTORY_URL, params=params)
+		return self._read_request("GET", endpoints.CHAT_HISTORY_URL, params=params)
 
 	def friend_label(self, friend_id: str, label_id: int, friend_source: int = 0, *, remove: bool = False) -> dict[str, Any]:
 		"""添加或移除好友标签。"""

@@ -177,12 +177,21 @@ boss config set request_delay "[3.0, 7.0]"
 
 Every error response contains `code`, `recoverable`, and `recovery_action`, so agents can react programmatically.
 
+> **Breaking change (code 37 classified by context):** previously every code 37 emitted `TOKEN_REFRESH_FAILED`
+> (`recoverable=true`, recovery `boss login`). Now only code 37 whose message explicitly indicates token/stoken expiry keeps
+> that behavior; environment-risk wording and ambiguous code 37 responses emit `ENVIRONMENT_RISK` (`recoverable=false`) and are
+> never refreshed, retried, or answered with a re-login hint. Agents that branch on error codes should add a terminal
+> `ENVIRONMENT_RISK` branch: never auto-login, refresh, or retry it — stop automation, keep the current dedicated profile, and
+> let the user verify on the official site before resuming manually.
+
 | Error Code | Meaning | Agent Recovery |
 |------------|---------|----------------|
 | `AUTH_REQUIRED` | Not logged in | `boss login` |
 | `AUTH_EXPIRED` | Session expired | `boss login` |
+| `BROWSER_SESSION_NOT_FOUND` | An existing-browser source was selected, but its Bridge/CDP session or target page is unavailable | Run `boss doctor`; open and log in to BOSS Zhipin in the daily browser, connect Bridge, then retry |
 | `RATE_LIMITED` | Too many requests | Wait and retry |
 | `TOKEN_REFRESH_FAILED` | stoken refresh failed | `boss login` |
+| `ENVIRONMENT_RISK` | The access environment was rejected | Stop automation; keep the current dedicated profile, verify it on the official site, and lower the request frequency |
 | `ACCOUNT_RISK` | Risk-control block (code 36) | Stop the workflow, retain its run ID/checkpoint, and resume only after resolving the account or security page |
 | `COMPLIANCE_BLOCKED` | Historical mode-policy block | Upgrade to the current version and retry; current execution paths do not emit it |
 | `WIZARD_INPUT_REQUIRED` | A headless workflow lacks role/platform/goal/inputs | Complete `--input-json` from the `boss schema` catalog |
@@ -190,6 +199,8 @@ Every error response contains `code`, `recoverable`, and `recovery_action`, so a
 | `WORKFLOW_PLAN_MISMATCH` | An existing `run_id` is bound to a different plan | Resume with the original plan or omit `run_id` to create a new run |
 | `JOB_NOT_FOUND` | Job removed or invalid | Skip |
 | `ALREADY_GREETED` | Already messaged recruiter | Skip |
+| `CONFIRMATION_REQUIRED` | Candidate and message not approved | Preview with `hr greet --dry-run`; set `--yes` only after explicit operator approval. Agents must not infer approval. |
+| `GREET_RESULT_UNKNOWN` | Send reserved, outcome unconfirmed | Check `boss hr chat --job-id <id>`; never automatically resend. Keep the local reservation and use the official page if needed. |
 | `ALREADY_APPLIED` | Already applied | Skip |
 | `GREET_LIMIT` | Daily greet quota hit | Pause until tomorrow |
 | `NETWORK_ERROR` | Connection failed | Retry with backoff |

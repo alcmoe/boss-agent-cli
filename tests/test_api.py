@@ -2,8 +2,11 @@ from boss_agent_cli.api.endpoints import (
 	CITY_CODES, SALARY_CODES, EXPERIENCE_CODES,
 	JOB_TYPE_CODES,
 	CODE_ACCOUNT_RISK, CODE_STOKEN_EXPIRED, CODE_RATE_LIMITED,
+	USER_INFO_URL,
 )
 from boss_agent_cli.api.models import JobDetail, JobItem
+
+import pytest
 
 
 def test_city_code_lookup():
@@ -194,6 +197,130 @@ def test_account_risk_error_not_raised_on_success():
 	result = client._browser_request("GET", "/wapi/zpgeek/search/joblist.json")
 	assert result["code"] == 0
 	assert result["zpData"]["jobList"][0]["jobName"] == "test"
+	client.close()
+
+
+def test_environment_risk_code_37_stops_without_refresh_or_retry():
+	"""环境风险 code 37 必须立即抛 EnvironmentRiskError：不刷新、不重试。"""
+	from unittest.mock import MagicMock
+	from boss_agent_cli.api.client import BossClient, EnvironmentRiskError
+
+	auth = MagicMock()
+	client = BossClient(auth)
+	mock_browser = MagicMock()
+	mock_browser.request.return_value = {"code": 37, "message": "您的环境存在异常"}
+	mock_browser._is_cdp = True
+	client._browser_session = mock_browser
+
+	with pytest.raises(EnvironmentRiskError) as exc_info:
+		client._browser_request("GET", "/wapi/zpgeek/search/joblist.json")
+
+	assert exc_info.value.is_cdp is True
+	mock_browser.request.assert_called_once()
+	auth.force_refresh.assert_not_called()
+	client.close()
+
+
+def test_ambiguous_code_37_fails_closed_as_environment_risk():
+	"""语义不明的 code 37 同样 fail closed，绝不刷新。"""
+	from unittest.mock import MagicMock
+	from boss_agent_cli.api.client import BossClient, EnvironmentRiskError
+
+	auth = MagicMock()
+	client = BossClient(auth)
+	mock_browser = MagicMock()
+	mock_browser.request.return_value = {"code": 37, "message": "请求失败"}
+	client._browser_session = mock_browser
+
+	with pytest.raises(EnvironmentRiskError):
+		client._browser_request("GET", "/wapi/zpgeek/search/joblist.json")
+
+	mock_browser.request.assert_called_once()
+	auth.force_refresh.assert_not_called()
+	client.close()
+
+
+def test_explicit_token_code_37_is_returned_without_refresh_or_retry():
+	"""浏览器通道：即便文案明确指向 token 过期，也不刷新、不重试，原样返回 code 37 交上层 parse_error。
+
+	浏览器通道的 stoken 由页面 JS 生成，force_refresh 拿不到新凭证，重试只是对已被风控
+	拦截的高风险端点再打一次（docs/research/platforms/zhipin.md 红线）。token_expired 的
+	code 37 在此原样返回响应字典，由上层 parse_error 映射成 TOKEN_REFRESH_FAILED，
+	与合并前行为逐字一致；刷新只发生在 httpx 通道。
+	"""
+	from unittest.mock import MagicMock
+	from boss_agent_cli.api.client import BossClient
+
+	auth = MagicMock()
+	client = BossClient(auth, cdp_url="http://127.0.0.1:9222")
+	mock_browser = MagicMock()
+	mock_browser.request.return_value = {"code": 37, "message": "__zp_stoken__ 已过期"}
+	client._browser_session = mock_browser
+
+	result = client._browser_request("GET", "/wapi/zpgeek/search/joblist.json")
+
+	assert result["code"] == 37
+	mock_browser.request.assert_called_once()
+	auth.force_refresh.assert_not_called()
+	client.close()
+
+
+def test_browser_channel_never_refreshes_on_any_code_37():
+	"""红线回归：浏览器通道对任意 code 37（无论分类结果）都不得调用 auth.force_refresh。
+
+	覆盖三种文案形态：明确 token、明确环境风险、语义不明。无论哪种，浏览器通道都只发
+	一次请求且绝不刷新——环境风险抛 EnvironmentRiskError，其余原样返回响应字典。
+	"""
+	from unittest.mock import MagicMock
+	from boss_agent_cli.api.client import BossClient, EnvironmentRiskError
+
+	cases = [
+		({"code": 37, "message": "__zp_stoken__ 已过期"}, None),  # token_expired → 原样返回
+		({"code": 37, "message": "您的环境存在异常"}, EnvironmentRiskError),  # environment_risk → 抛
+		({"code": 37, "message": "请求失败"}, EnvironmentRiskError),  # 语义不明 → fail closed 抛
+	]
+	for payload, expected_exc in cases:
+		auth = MagicMock()
+		client = BossClient(auth)
+		mock_browser = MagicMock()
+		mock_browser.request.return_value = payload
+		client._browser_session = mock_browser
+
+		if expected_exc is not None:
+			with pytest.raises(expected_exc):
+				client._browser_request("GET", "/wapi/zpgeek/search/joblist.json")
+		else:
+			assert client._browser_request("GET", "/wapi/zpgeek/search/joblist.json")["code"] == 37
+
+		mock_browser.request.assert_called_once()
+		auth.force_refresh.assert_not_called()
+		client.close()
+
+
+def test_httpx_ambiguous_code_37_returns_dict_without_refresh():
+	"""httpx 通道：语义不明的 code 37 不刷新、不 sleep，按响应字典原样返回。"""
+	from unittest.mock import MagicMock, patch
+
+	from boss_agent_cli.api.client import BossClient
+
+	auth = MagicMock()
+	client = BossClient(auth)
+	client._throttle.wait = lambda: None
+	client._throttle.mark = lambda: None
+	mock_httpx = MagicMock()
+	mock_httpx.request.return_value = MagicMock(
+		status_code=200, text="", cookies=MagicMock(),
+		json=lambda: {"code": CODE_STOKEN_EXPIRED, "message": "请求失败"},
+	)
+	mock_httpx.cookies = MagicMock()
+	client._client = mock_httpx
+
+	with patch("boss_agent_cli.api._base_client.time.sleep") as mock_sleep:
+		data = client._request("GET", USER_INFO_URL)
+
+	assert data["code"] == CODE_STOKEN_EXPIRED
+	auth.force_refresh.assert_not_called()
+	mock_sleep.assert_not_called()
 	client.close()
 
 

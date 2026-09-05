@@ -9,7 +9,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from boss_agent_cli.api.recruiter_endpoints import BASE_URL
+from boss_agent_cli.api.recruiter_endpoints import BASE_URL, CODE_STOKEN_EXPIRED
+from boss_agent_cli.api.zhipin_errors import classify_code_37, response_message
 from boss_agent_cli.platforms.recruiter_base import RecruiterPlatform
 
 if TYPE_CHECKING:
@@ -20,7 +21,6 @@ if TYPE_CHECKING:
 _ERROR_CODE_MAP: dict[int, str] = {
 	9: "RATE_LIMITED",
 	36: "ACCOUNT_RISK",
-	37: "TOKEN_REFRESH_FAILED",
 	121: "INVALID_PARAM",
 }
 
@@ -50,7 +50,10 @@ class BossRecruiterPlatform(RecruiterPlatform):
 
 	def parse_error(self, response: dict[str, Any]) -> tuple[str, str]:
 		code = response.get("code")
-		message = str(response.get("message") or response.get("zpData") or "")
+		message = response_message(response)
+		if code == CODE_STOKEN_EXPIRED:
+			unified = "TOKEN_REFRESH_FAILED" if classify_code_37(response) == "token_expired" else "ENVIRONMENT_RISK"
+			return unified, message
 		unified = _ERROR_CODE_MAP.get(code, "UNKNOWN") if isinstance(code, int) else "UNKNOWN"
 		# 端点漂移场景下重映射 121：调用方（_browser_request / _request）在 response dict 注入
 		# __cli_endpoint_hint__ 字段（CLI 内部命名空间，避免与服务端字段冲突）。
@@ -62,8 +65,9 @@ class BossRecruiterPlatform(RecruiterPlatform):
 
 	# ── 候选人列表与筛选 ────────────────────────────────
 
-	def friend_list(self, page: int = 1, label_id: int = 0, job_id: str | None = None) -> dict[str, Any]:
-		return self._client.friend_list(page=page, label_id=label_id, job_id=job_id)
+	def friend_list(self, page: int = 1, label_id: int = 0, job_id: str | None = None, *, deadline: float | None = None) -> dict[str, Any]:
+		options = {"deadline": deadline} if deadline is not None else {}
+		return self._client.friend_list(page=page, label_id=label_id, job_id=job_id, **options)
 
 	def friend_detail(self, friend_ids: list[int]) -> dict[str, Any]:
 		return self._client.friend_detail(friend_ids)
@@ -132,8 +136,9 @@ class BossRecruiterPlatform(RecruiterPlatform):
 
 	# ── 消息 / 聊天 ──────────────────────────────────────
 
-	def last_messages(self, friend_ids: list[int]) -> dict[str, Any]:
-		return self._client.last_messages(friend_ids)
+	def last_messages(self, friend_ids: list[int], *, deadline: float | None = None) -> dict[str, Any]:
+		options = {"deadline": deadline} if deadline is not None else {}
+		return self._client.last_messages(friend_ids, **options)
 
 	def chat_history(self, gid: int, *, count: int = 20, max_msg_id: int | None = None) -> dict[str, Any]:
 		return self._client.chat_history(gid, count=count, max_msg_id=max_msg_id)
@@ -172,8 +177,8 @@ class BossRecruiterPlatform(RecruiterPlatform):
 	def exchange_content(self, uid: int) -> dict[str, Any]:
 		return self._client.exchange_content(uid)
 
-	def mark_read(self, *, peer_uid: int, message_id: int, user_source: int = 0) -> dict[str, Any]:
-		return self._client.mark_read(peer_uid=peer_uid, message_id=message_id, user_source=user_source)
+	def mark_read(self, *, peer_uid: int, message_id: int, user_source: int = 0, deadline: float | None = None) -> dict[str, Any]:
+		return self._client.mark_read(peer_uid=peer_uid, message_id=message_id, user_source=user_source, deadline=deadline)
 
 	# ── 面试 ──────────────────────────────────────────────
 

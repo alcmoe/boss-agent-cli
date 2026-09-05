@@ -143,12 +143,19 @@ boss --cdp-url http://localhost:9222 login --cdp
 
 每个错误信封都带 `code`、`recoverable`、`recovery_action`，Agent 可程序化恢复。
 
+> **Breaking change（code 37 按语境分类）：** 此前所有 code 37 都发 `TOKEN_REFRESH_FAILED`（`recoverable=true`，恢复动作 `boss login`）。
+> 现在只有文案明确指向 token/stoken 过期的 code 37 保持该行为；环境风险文案及语义不明确的 code 37 一律发 `ENVIRONMENT_RISK`
+> （`recoverable=false`），且不会刷新、重试或提示重新登录。按错误码分支的 Agent 应新增 `ENVIRONMENT_RISK` 终止分支：
+> 绝不对其自动登录、刷新 Token 或重试，先停止自动化访问，保留当前专用 profile，在官方页面确认后再由用户手动发起。
+
 | 错误码 | 含义 | Agent 自动修复 |
 |--------|------|---------------|
 | `AUTH_REQUIRED` | 未登录 | `boss login` |
 | `AUTH_EXPIRED` | 登录过期 | `boss login` |
+| `BROWSER_SESSION_NOT_FOUND` | 已选择现有浏览器来源，但 Bridge/CDP 会话或目标页面不可用 | 运行 `boss doctor`；在日常浏览器中打开并登录 BOSS 直聘，连接 Bridge 后重试 |
 | `RATE_LIMITED` | 频率过高 | 等待后重试 |
 | `TOKEN_REFRESH_FAILED` | Token 刷新失败 | `boss login` |
+| `ENVIRONMENT_RISK` | 访问环境存在异常 | 停止自动化访问；保留当前专用 profile，在官方页面确认并降低访问频率 |
 | `ACCOUNT_RISK` | 风控拦截 | 停止当前 workflow，保留 run ID/checkpoint；处理登录或安全页后再显式恢复 |
 | `COMPLIANCE_BLOCKED` | 历史版本模式策略阻断 | 升级当前版本后重试；当前版本不主动产生此错误 |
 | `WIZARD_INPUT_REQUIRED` | headless workflow 缺少 role/platform/goal/inputs | 按 `boss schema` catalog 补齐 `--input-json` |
@@ -156,6 +163,8 @@ boss --cdp-url http://localhost:9222 login --cdp
 | `WORKFLOW_PLAN_MISMATCH` | 现有 `run_id` 与请求 plan 不一致 | 使用原 plan 恢复，或不传 `run_id` 创建新任务 |
 | `INVALID_PARAM` | 参数错误 | 修正参数 |
 | `ALREADY_GREETED` | 已打过招呼 | 跳过 |
+| `CONFIRMATION_REQUIRED` | 未确认具体候选人和话术 | 先用 `hr greet --dry-run` 预览；操作者明确批准后才加 `--yes`，Agent 不可自行补确认 |
+| `GREET_RESULT_UNKNOWN` | 已预约发送，但结果未确认 | 用 `boss hr chat --job-id <id>` 核对会话，禁止自动重发；本地保留预约，必要时在官方页面处理 |
 | `GREET_LIMIT` | 今日次数用完 | 告知用户 |
 | `NETWORK_ERROR` | 网络错误 | 重试 |
 | `AI_NOT_CONFIGURED` | AI 未配置 | `boss ai config` |
