@@ -5,7 +5,7 @@ import sqlite3
 import time
 from pathlib import Path
 from types import TracebackType
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 _SEARCH_TTL = 86400  # 24 hours
 _MAX_SEARCH_CACHE = 100
@@ -586,11 +586,11 @@ class CacheStore:
 			).fetchone()
 			return str(row[0])
 
-	def record_recruiter_greet(self, geek_id: str, job_id: str) -> None:
+	def record_recruiter_greet(self, geek_id: str, job_id: str, *, status: Literal["sent", "quota_limited"] = "sent") -> None:
 		with self._conn:
 			self._conn.execute(
 				"UPDATE recruiter_greet_records SET status = ?, updated_at = ? WHERE geek_id = ? AND job_id = ?",
-				("sent", time.time(), geek_id, job_id),
+				(status, time.time(), geek_id, job_id),
 			)
 
 	def get_job_id(self, security_id: str) -> str | None:

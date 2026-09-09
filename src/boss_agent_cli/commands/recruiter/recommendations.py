@@ -43,7 +43,11 @@ def _send_error(ctx: click.Context, *, code: str, job_id: str, details: dict[str
 	message = "招呼已发送，但本地状态保存失败；停止后续建联" if details.get("sent") else "首次招呼未确认成功；停止发送并核对会话"
 	if code == "ALREADY_GREETED":
 		message = "该候选人在此职位下已发送过招呼，禁止重复发送"
-	if code == "ACCOUNT_RISK":
+	if code == "GREET_LIMIT":
+		message = str(details.get("platform_message") or "该职位的主动沟通权益已用完，本次未发送")
+		action = "停止该职位的新招呼，等待平台权益恢复；不要自动重发本次招呼"
+		hints = {"operator_actions": [action]}
+	elif code == "ACCOUNT_RISK":
 		action = "账号已触发风控，停止自动化访问；回到 BOSS 直聘官方页面处理"
 		hints = {"operator_actions": [action, "禁止重新发送本次招呼"]}
 	else:
@@ -105,8 +109,9 @@ def greet_cmd(
 		auth.get_token()
 		previous = cache.claim_recruiter_greet(geek_id, job_id)
 		if previous is not None:
-			data["sent"] = True if previous == "sent" else None
-			_send_error(ctx, code="ALREADY_GREETED" if previous == "sent" else "GREET_RESULT_UNKNOWN", job_id=job_id, details=data)
+			data["sent"] = True if previous == "sent" else False if previous == "quota_limited" else None
+			code = "ALREADY_GREETED" if previous == "sent" else "GREET_LIMIT" if previous == "quota_limited" else "GREET_RESULT_UNKNOWN"
+			_send_error(ctx, code=code, job_id=job_id, details=data)
 			return
 		# 预约后即使进程退出也不自动再发；通用异常处理不得把写失败提示为“重试”。
 		data["sent"] = None
@@ -132,7 +137,17 @@ def greet_cmd(
 			_send_error(ctx, code="GREET_RESULT_UNKNOWN", job_id=job_id, details=data)
 			return
 		if not platform.is_success(result):
-			code, _ = platform.parse_error(result)
+			code, platform_message = platform.parse_error(result)
+			data["platform_message"] = platform_message
+			if type(result.get("code")) is int:
+				data["platform_code"] = result["code"]
+			if code == "GREET_LIMIT":
+				data["sent"] = False
+				try:
+					cache.record_recruiter_greet(geek_id, job_id, status="quota_limited")
+				except Exception:
+					# 即使记账失败也保留平台明确拒绝的事实；原 pending 仍阻止重发。
+					pass
 			_send_error(ctx, code=code if code != "UNKNOWN" else "GREET_RESULT_UNKNOWN", job_id=job_id, details=data)
 			return
 		data["sent"] = True

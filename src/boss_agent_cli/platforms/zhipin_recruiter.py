@@ -1,6 +1,6 @@
 """BOSS 直聘招聘者平台 adapter。
 
-把 ``BossRecruiterClient`` 包装为 ``RecruiterPlatform`` 实现，零行为变化。
+把 ``BossRecruiterClient`` 包装为 ``RecruiterPlatform`` 实现，统一包络与业务拒绝语义。
 后续新平台实现同一 RecruiterPlatform 接口，
 命令层可以通过 ``get_recruiter_platform(name)`` 无差别调用。
 """
@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from boss_agent_cli.api.recruiter_endpoints import BASE_URL, CODE_STOKEN_EXPIRED
+from boss_agent_cli.api.recruiter_endpoints import BASE_URL, BOSS_CHAT_START_URL, CODE_STOKEN_EXPIRED
 from boss_agent_cli.api.zhipin_errors import classify_code_37, response_message
 from boss_agent_cli.platforms.recruiter_base import RecruiterPlatform
 
@@ -31,6 +31,20 @@ _ERROR_CODE_MAP: dict[int, str] = {
 _DEPRECATED_ENDPOINT_FRAGMENTS: tuple[str, ...] = ("fastReply/sendReplyMsg",)
 
 
+def _greet_business_error(response: dict[str, Any]) -> tuple[str, str] | None:
+	"""首次开聊的 code=0 也可能只是成功返回权益拦截页。"""
+	if response.get("code") != 0 or response.get("__cli_endpoint_hint__") != BOSS_CHAT_START_URL:
+		return None
+	data = response.get("zpData")
+	if not isinstance(data, dict) or type(data.get("chat")) is not int or data["chat"] != 0:
+		return None
+	title = data.get("limitTitle")
+	if type(data.get("status")) is int and data["status"] == 3 and isinstance(title, str) and title.strip():
+		description = data.get("stateDesc") or data.get("stateDes")
+		return "GREET_LIMIT", f"{title}；{description}" if isinstance(description, str) and description else title
+	return "GREET_RESULT_UNKNOWN", "平台返回未开聊状态，未确认首次招呼成功"
+
+
 class BossRecruiterPlatform(RecruiterPlatform):
 	"""BOSS 直聘招聘者平台实现。"""
 
@@ -45,12 +59,15 @@ class BossRecruiterPlatform(RecruiterPlatform):
 	# ── 包络适配 ────────────────────────────────────────
 
 	def is_success(self, response: dict[str, Any]) -> bool:
-		return response.get("code") == 0
+		return response.get("code") == 0 and _greet_business_error(response) is None
 
 	def unwrap_data(self, response: dict[str, Any]) -> Any:
 		return response.get("zpData")
 
 	def parse_error(self, response: dict[str, Any]) -> tuple[str, str]:
+		greet_error = _greet_business_error(response)
+		if greet_error is not None:
+			return greet_error
 		code = response.get("code")
 		message = response_message(response)
 		if code == CODE_STOKEN_EXPIRED:

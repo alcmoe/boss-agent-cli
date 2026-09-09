@@ -22,6 +22,7 @@
   强制走浏览器通道获取职位卡片；既有 `job_card()` 的 httpx 优先行为完全不变。
 
 ### Fixed
+- 修复招聘者首次招呼将 `code=0` 的权益拦截页误判为成功：识别开聊业务拒绝，返回 `GREET_LIMIT`、`sent=false` 及脱敏平台提示；保留拒绝状态并阻止重复发送，不影响其他端点的成功判断。
 - 招聘者招呼与附件操作保留登录失效、令牌刷新失败和账号风控分类，未知发送结果停止重试；最近消息未知未读数不覆盖会话真实计数，支持 `lastMsgInfo.showText`。
 - **stoken 静默刷新现在遵守 `browser_source` 策略表（Issue #387 seam 收尾）。** #410 把浏览器通道
   选择收进策略表后，httpx 通道的 stoken 刷新（`_base_client._request` → `AuthManager.force_refresh`）

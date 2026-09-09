@@ -143,7 +143,7 @@ Preview the candidate parameters and message with `--dry-run`. Replace it with `
 
 `greet` atomically reserves the encrypted candidate/job pair locally and records a confirmed send. A lost response, process exit, or rate limit leaves the reservation in place and blocks automatic resending. Check `boss hr chat --job-id <id>` and use the official page if needed; do not delete the reservation to resend.
 
-`greet` only sends first contact. It does not open an MQTT connection or clear unread state. Success returns `sent=true`; if saving local state fails after sending, the error envelope preserves `error.details.sent=true`. Never resend because local bookkeeping failed. Unknown unread counts in `chat` / `last-messages` remain `null`, not zero.
+`greet` only sends first contact. It does not open an MQTT connection or clear unread state. Success returns `sent=true`; if saving local state fails after sending, the error envelope preserves `error.details.sent=true`. Never resend because local bookkeeping failed. BOSS can return a quota-block page inside a `code=0` response; the CLI recognizes this business rejection and returns `GREET_LIMIT` with `error.details.sent=false` and a redacted platform message. The rejected candidate/job pair remains reserved to prevent retries. Platform limits may be per job and lower than a caller's configured daily budget. Unknown unread counts in `chat` / `last-messages` remain `null`, not zero.
 
 ### Accepting and downloading attached resumes
 

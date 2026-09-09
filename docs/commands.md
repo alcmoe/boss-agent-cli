@@ -149,7 +149,7 @@ boss crawl stop <run_id>
 
 `greet` 按候选人和招聘职位的加密 ID 在本地原子预约，成功后记录已发送；响应丢失、进程退出或限流时保留预约，禁止自动重发。使用 `boss hr chat --job-id <id>` 核对会话，必要时在官方页面处理，不要删除记录来重发。
 
-`greet` 只发送首次招呼，不建立 MQTT 连接、不清理红点。成功返回 `sent=true`；若发送后本地记录失败，错误信封仍在 `error.details.sent=true` 保留已发送事实，不能因此重发。`chat` / `last-messages` 中未知未读数保留为 `null`，不当作零。
+`greet` 只发送首次招呼，不建立 MQTT 连接、不清理红点。成功返回 `sent=true`；若发送后本地记录失败，错误信封仍在 `error.details.sent=true` 保留已发送事实，不能因此重发。BOSS 外层 `code=0` 也可能返回权益拦截页；CLI 会识别这类业务拒绝，返回 `GREET_LIMIT`、`error.details.sent=false` 和脱敏平台提示，保留拒绝状态以阻止重发。平台可能按职位限制免费沟通人数，不能把调用方配置的日额度当作平台保证。`chat` / `last-messages` 中未知未读数保留为 `null`，不当作零。
 
 ### 接收与下载附件简历
 
