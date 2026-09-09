@@ -6,11 +6,14 @@ Endpoints sourced from newboss/boss-cli project (confirmed via reverse engineeri
 
 import atexit
 import json
+from pathlib import Path
 from typing import Any, cast
+from urllib.parse import quote
 
 from boss_agent_cli.api import recruiter_endpoints as ep
 from boss_agent_cli.api._base_client import _BaseHttpClient
 from boss_agent_cli.api.httpx_helpers import make_client_registry
+from boss_agent_cli.api.recruiter_resume import ResumeValidationError, attachment_params, incoming_message, resume_friend, save_resume
 from boss_agent_cli.api.zhipin_errors import classify_code_37
 
 _OPEN_CLIENTS, _close_open_clients = make_client_registry()
@@ -154,6 +157,8 @@ return {
 
 _EXCHANGE_COMPONENT_NAMES = {1: "ExchangePhone", 2: "ExchangeWx", 4: "ExchangeResume"}
 _EXCHANGE_MESSAGE_TEXT = {1: "请求交换联系方式", 2: "请求交换联系方式", 4: "方便发一份简历过来吗？"}
+_RESUME_REQUEST_DIALOG_TYPE = 2
+_RESUME_ACCEPT_TYPE = 3
 
 
 atexit.register(_close_open_clients)
@@ -335,16 +340,16 @@ class BossRecruiterClient(_BaseHttpClient):
 
 	# ── 候选人列表与筛选 ────────────────────────────────
 
-	def friend_list(self, page: int = 1, label_id: int = 0, job_id: str | None = None, *, deadline: float | None = None) -> dict[str, Any]:
+	def friend_list(self, page: int = 1, label_id: int = 0, job_id: str | None = None) -> dict[str, Any]:
 		data: dict[str, Any] = {"labelId": label_id, "page": page}
 		if job_id:
 			data["encJobId"] = job_id
-		options: dict[str, Any] = {"deadline": deadline} if deadline is not None else {}
-		return self._request("POST", ep.BOSS_FRIEND_LIST_URL, data=data, **options)
+		return self._request("POST", ep.BOSS_FRIEND_LIST_URL, data=data)
 
-	def friend_detail(self, friend_ids: list[int]) -> dict[str, Any]:
+	def friend_detail(self, friend_ids: list[int], *, retry: bool = True) -> dict[str, Any]:
 		data = {"friendIds": ",".join(str(i) for i in friend_ids)}
-		return self._request("POST", ep.BOSS_FRIEND_DETAIL_URL, data=data)
+		options = {"retry": False, "follow_redirects": False} if not retry else {}
+		return self._request("POST", ep.BOSS_FRIEND_DETAIL_URL, data=data, **options)
 
 	def friend_labels(self) -> dict[str, Any]:
 		return self._request("GET", ep.BOSS_FRIEND_LABELS_URL)
@@ -488,16 +493,16 @@ class BossRecruiterClient(_BaseHttpClient):
 
 	# ── 消息 / 聊天 ──────────────────────────────────────
 
-	def last_messages(self, friend_ids: list[int], *, deadline: float | None = None) -> dict[str, Any]:
+	def last_messages(self, friend_ids: list[int]) -> dict[str, Any]:
 		data = {"friendIds": ",".join(str(i) for i in friend_ids), "src": 0}
-		options: dict[str, Any] = {"deadline": deadline} if deadline is not None else {}
-		return self._request("POST", ep.BOSS_LAST_MESSAGES_URL, data=data, **options)
+		return self._request("POST", ep.BOSS_LAST_MESSAGES_URL, data=data)
 
-	def chat_history(self, gid: int, *, count: int = 20, max_msg_id: int | None = None) -> dict[str, Any]:
+	def chat_history(self, gid: int, *, count: int = 20, max_msg_id: int | None = None, retry: bool = True) -> dict[str, Any]:
 		params: dict[str, Any] = {"gid": gid, "c": count, "src": 0}
 		if max_msg_id:
 			params["maxMsgId"] = max_msg_id
-		return self._request("GET", ep.BOSS_CHAT_HISTORY_URL, params=params)
+		options = {"retry": False, "follow_redirects": False} if not retry else {}
+		return self._request("GET", ep.BOSS_CHAT_HISTORY_URL, params=params, **options)
 
 	def send_message(self, gid: int, content: str) -> dict[str, Any]:
 		"""DEPRECATED: 旧的 fastReply/sendReplyMsg 端点已被 BOSS 弃用。
@@ -715,70 +720,76 @@ class BossRecruiterClient(_BaseHttpClient):
 			),
 		}
 
+	def accept_resume_by_friend(self, friend_id: int, message_id: int) -> dict[str, Any]:
+		"""同意指定会话中的附件简历请求；验证目标后仅发送一次 HTTP POST。
+
+		网页 v11308：dialog.type=2 对应 agreeAction=3，不能使用求简历的 type=4。
+		网页还注入动态 sigx；此处沿用原生 HTTP 认证，不伪造指纹或降级到浏览器。
+		"""
+		if friend_id <= 0 or message_id <= 0:
+			raise ResumeValidationError("friend_id 和 message_id 必须为正整数")
+		history = self.chat_history(friend_id, count=100, max_msg_id=message_id + 1, retry=False)
+		if history.get("code") != 0:
+			return history
+		message = incoming_message(history.get("zpData"), friend_id, message_id)
+		body = message.get("body") or {}
+		dialog = body.get("dialog") if isinstance(body, dict) else None
+		if not isinstance(dialog, dict) or body.get("type") != 7 or dialog.get("type") != _RESUME_REQUEST_DIALOG_TYPE:
+			raise ResumeValidationError("该消息不是附件简历请求，不会执行联系方式交换")
+		if dialog.get("operated") is not False:
+			raise ResumeValidationError("该请求已处理或状态不明，不会重复同意")
+		friends = self.friend_detail([friend_id], retry=False)
+		if friends.get("code") != 0:
+			return friends
+		friend = resume_friend(friends.get("zpData"), friend_id)
+		if not isinstance(friend.get("securityId"), str) or not friend["securityId"]:
+			raise ResumeValidationError("无法取得指定候选人的当前会话 securityId")
+		return self._request(
+			"POST", ep.BOSS_EXCHANGE_ACCEPT_URL,
+			data={"mid": message_id, "type": _RESUME_ACCEPT_TYPE, "securityId": friend["securityId"]},
+			retry=False,
+			follow_redirects=False,
+		)
+
+	def download_resume_by_friend(self, friend_id: int, message_id: int, output: Path) -> dict[str, Any]:
+		"""下载已收到的指定附件；不自动同意请求，不返回临时下载凭据。"""
+		if friend_id <= 0 or message_id <= 0:
+			raise ResumeValidationError("friend_id 和 message_id 必须为正整数")
+		if output.exists() or output.is_symlink():
+			raise FileExistsError("输出文件已存在，不会覆盖")
+		history = self.chat_history(friend_id, count=100, max_msg_id=message_id + 1, retry=False)
+		if history.get("code") != 0:
+			return history
+		message = incoming_message(history.get("zpData"), friend_id, message_id)
+		params = attachment_params(message)
+		friends = self.friend_detail([friend_id], retry=False)
+		if friends.get("code") != 0:
+			return friends
+		friend = resume_friend(friends.get("zpData"), friend_id)
+		geek_id = friend.get("encryptUid")
+		if not isinstance(geek_id, str) or not geek_id or geek_id in (".", ".."):
+			raise ResumeValidationError("当前会话缺少候选人的 encryptUid")
+		check = self._request("GET", ep.BOSS_RESUME_PREVIEW_CHECK_URL, params={"geekId": geek_id, **params}, retry=False, follow_redirects=False)
+		if check.get("code") != 0:
+			return check
+		detail = check.get("zpData")
+		if not isinstance(detail, dict) or detail.get("isResumeVisible") is not True or detail.get("expired") not in (None, False, 0):
+			raise ResumeValidationError("附件不可访问或已过期，请在官方页面核对")
+		# isCanPreview=false 仅表示无法在线预览，网页仍允许下载原附件。
+		if isinstance(detail.get("d"), str) and detail["d"]:
+			params["d"] = detail["d"]
+		url = ep.BOSS_RESUME_DOWNLOAD_URL + quote(geek_id, safe="")
+		self._throttle.wait()
+		try:
+			with self._get_client().stream("GET", url, params=params, headers={"Referer": ep.WEB_BOSS_CHAT}, follow_redirects=False) as response:
+				file_data = save_resume(response, output)
+		finally:
+			self._throttle.mark()
+		return {"code": 0, "zpData": file_data}
+
 	def exchange_content(self, uid: int) -> dict[str, Any]:
 		data = {"uid": uid}
 		return self._request("POST", ep.BOSS_EXCHANGE_CONTENT_URL, data=data)
-
-	def mark_read(self, *, peer_uid: int, message_id: int, user_source: int = 0, deadline: float | None = None, allow_mqtt_session: bool = False) -> dict[str, Any]:
-		"""Publish one read receipt and wait for MQTT acknowledgement."""
-		if allow_mqtt_session is not True:
-			raise PermissionError("Independent MQTT sessions may disconnect the webpage; explicit permission required")
-
-		import time
-
-		from boss_agent_cli.api.recruiter_mqtt import RecruiterMqttCredentials, mark_chat_read
-
-		if deadline is None:
-			deadline = time.monotonic() + 25
-		batch = self._request(
-			"POST",
-			ep.BOSS_BATCH_REQUESTS_URL,
-			deadline=deadline,
-			json={
-				"subReqs": [
-					{"method": "GET", "path": "/wapi/zppassport/get/wt"},
-					{"method": "GET", "path": "/wapi/zpuser/wap/getUserInfo.json"},
-				]
-			},
-		)
-		if batch.get("code") != 0:
-			return batch
-		batch_data = batch.get("zpData") or {}
-		for path in ("/wapi/zppassport/get/wt", "/wapi/zpuser/wap/getUserInfo.json"):
-			sub_response = batch_data.get(path) or {}
-			if sub_response.get("code") != 0:
-				return cast("dict[str, Any]", sub_response)
-		ws_config = self._request("GET", ep.BOSS_WS_CONFIG_URL, deadline=deadline)
-		if ws_config.get("code") != 0:
-			return ws_config
-		wt_data = (batch_data.get("/wapi/zppassport/get/wt") or {}).get("zpData") or {}
-		user_data = (batch_data.get("/wapi/zpuser/wap/getUserInfo.json") or {}).get("zpData") or {}
-		servers = (ws_config.get("zpData") or {}).get("result") or []
-		if not wt_data.get("wt2") or not user_data.get("token") or not user_data.get("userId") or not servers:
-			return {"code": -1, "message": "MQTT bootstrap failed", "zpData": {"ok": False}}
-		token = self._auth.get_token()
-		cookies = self._get_client().cookies
-		parts = str(cookies.get("__a") or "").split(".")
-		# 网页的 uniqid 来自 __a，不是 userId；缺失时留空，不伪造用户标识。
-		uniqid = parts[1] + parts[0] if len(parts) > 1 else ""
-		result = mark_chat_read(
-			RecruiterMqttCredentials(
-				server=str(servers[0]),
-				username=str(user_data["token"]),
-				password=str(wt_data["wt2"]),
-				user_id=int(user_data["userId"]),
-				uniqid=uniqid,
-				client_ip=str(user_data.get("clientIP") or ""),
-				model=str(cookies.get("sid") or ""),
-			),
-			cookies=cookies,
-			user_agent=str(token.get("user_agent") or ep.DEFAULT_HEADERS.get("User-Agent") or ""),
-			peer_uid=peer_uid,
-			message_id=message_id,
-			user_source=user_source,
-			deadline=deadline,
-		)
-		return {"code": 0, "message": "Success", "zpData": result}
 
 	# ── 面试 ──────────────────────────────────────────────
 

@@ -285,29 +285,3 @@ def test_zp_token_is_scoped_and_uses_rotated_cookie():
 	assert http_client.calls[0]["headers"]["zp_token"] == "old"
 	assert http_client.calls[1]["headers"]["zp_token"] == "new"
 	assert "zp_token" not in http_client.calls[2]["headers"]
-
-
-def test_receipt_deadline_disables_read_retries():
-	import time
-	auth = FakeAuthManager()
-	client = BossRecruiterClient(auth)
-	http_client = FakeHttpxClient([FakeResponse(payload={"code": 37})])
-	client._client = http_client
-	client._throttle.wait = lambda **kwargs: None
-	client._throttle.mark = lambda: None
-	result = client.friend_list(deadline=time.monotonic() + 10)
-	assert result["code"] == 37
-	assert len(http_client.calls) == 1
-	assert 0 < http_client.calls[0]["kwargs"]["timeout"] <= 10
-	assert auth.refresh_calls == []
-
-
-def test_throttle_cannot_exceed_receipt_budget():
-	from boss_agent_cli.api.throttle import RequestThrottle
-	throttle = RequestThrottle((10, 10))
-	with patch("boss_agent_cli.api.throttle.time.time", return_value=100), patch("boss_agent_cli.api.throttle.time.sleep") as sleep:
-		throttle._last_request_time = 100
-		with pytest.raises(TimeoutError):
-			throttle.wait(timeout=1)
-		sleep.assert_not_called()
-		assert throttle._last_request_time == 100

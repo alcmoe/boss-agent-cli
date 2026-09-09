@@ -126,20 +126,22 @@ endpoints:
     method: POST
     path: "/wapi/zpchat/exchange/request"
     referer: "/web/chat/index"
+  boss_exchange_accept:
+    method: POST
+    path: "/wapi/zpchat/exchange/accept"
+    referer: "/web/chat/index"
+  boss_resume_preview_check:
+    method: GET
+    path: "/wapi/zpgeek/resume/boss/preview/check.json"
+    referer: "/web/chat/index"
+  boss_resume_download:
+    method: GET
+    url: "https://docdownload.zhipin.com/wflow/zpgeek/download/download4boss/"
+    referer: "/web/chat/index"
   boss_exchange_content:
     method: POST
     path: "/wapi/zprelation/friend/getExchangeContent"
     referer: "/web/chat/index"
-  # ── MQTT chat bootstrap ────────────────────────────
-  boss_batch_requests:
-    method: POST
-    path: "/wapi/batch/requests"
-    referer: "/web/chat/index"
-  boss_ws_config:
-    method: GET
-    path: "/wapi/zpchat/config/ws"
-    referer: "/web/chat/index"
-
   # ── 面试 ────────────────────────────────────────────
   boss_interview_list:
     method: GET

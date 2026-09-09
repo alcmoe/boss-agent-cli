@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from boss_agent_cli.api.recruiter_endpoints import BASE_URL, CODE_STOKEN_EXPIRED
@@ -66,9 +67,8 @@ class BossRecruiterPlatform(RecruiterPlatform):
 
 	# ── 候选人列表与筛选 ────────────────────────────────
 
-	def friend_list(self, page: int = 1, label_id: int = 0, job_id: str | None = None, *, deadline: float | None = None) -> dict[str, Any]:
-		options = {"deadline": deadline} if deadline is not None else {}
-		return self._client.friend_list(page=page, label_id=label_id, job_id=job_id, **options)
+	def friend_list(self, page: int = 1, label_id: int = 0, job_id: str | None = None) -> dict[str, Any]:
+		return self._client.friend_list(page=page, label_id=label_id, job_id=job_id)
 
 	def friend_detail(self, friend_ids: list[int]) -> dict[str, Any]:
 		return self._client.friend_detail(friend_ids)
@@ -137,9 +137,8 @@ class BossRecruiterPlatform(RecruiterPlatform):
 
 	# ── 消息 / 聊天 ──────────────────────────────────────
 
-	def last_messages(self, friend_ids: list[int], *, deadline: float | None = None) -> dict[str, Any]:
-		options = {"deadline": deadline} if deadline is not None else {}
-		return self._client.last_messages(friend_ids, **options)
+	def last_messages(self, friend_ids: list[int]) -> dict[str, Any]:
+		return self._client.last_messages(friend_ids)
 
 	def chat_history(self, gid: int, *, count: int = 20, max_msg_id: int | None = None) -> dict[str, Any]:
 		return self._client.chat_history(gid, count=count, max_msg_id=max_msg_id)
@@ -175,11 +174,14 @@ class BossRecruiterPlatform(RecruiterPlatform):
 	def exchange_request_by_friend(self, friend_id: int, exchange_type: int) -> dict[str, Any]:
 		return self._client.exchange_request_by_friend(friend_id, exchange_type)
 
+	def accept_resume_by_friend(self, friend_id: int, message_id: int) -> dict[str, Any]:
+		return self._client.accept_resume_by_friend(friend_id, message_id)
+
 	def exchange_content(self, uid: int) -> dict[str, Any]:
 		return self._client.exchange_content(uid)
 
-	def mark_read(self, *, peer_uid: int, message_id: int, user_source: int = 0, deadline: float | None = None, allow_mqtt_session: bool = False) -> dict[str, Any]:
-		return self._client.mark_read(peer_uid=peer_uid, message_id=message_id, user_source=user_source, deadline=deadline, allow_mqtt_session=allow_mqtt_session)
+	def download_resume_by_friend(self, friend_id: int, message_id: int, output: Path) -> dict[str, Any]:
+		return self._client.download_resume_by_friend(friend_id, message_id, output)
 
 	# ── 面试 ──────────────────────────────────────────────
 

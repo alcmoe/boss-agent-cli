@@ -12,7 +12,7 @@ boss schema --format anthropic-tools   # export Claude Tool Use definitions
 boss <cmd> --help                      # options for a single command
 ```
 
-`boss schema` currently exposes 39 top-level commands, plus 11 first-level recruiter
+`boss schema` currently exposes 39 top-level commands, plus 13 first-level recruiter
 subcommands under `hr`, grouped below by workflow stage.
 
 Compatibility setting: `boss config set operating_mode assisted|research`. Both modes can call every implemented capability; schema still reports risk/data classifications, and missing platform implementations return `NOT_SUPPORTED`.
@@ -135,19 +135,25 @@ After every page, `<data-dir>/crawl/runs/<run_id>/jobs.json`, `jobs.csv`, and a 
 | `boss hr jobs list/offline/online/detail` | Job listing, detail, and lifecycle management |
 | `boss hr applications` / `hr resume` / `hr chat` / `hr chatmsg` / `hr last-messages` / `hr candidates` / `hr reply` / `hr request-resume` | Candidate applications, resumes, conversations, search, replies, and attached-resume requests |
 | `boss hr recommendations --job-id <encJobId>` | Read rich recommended-candidate cards and first-contact parameters |
-| `boss hr greet ... --message <text> --yes` | Create a conversation, send the first contact once, and clean up its unread state when needed |
+| `boss hr accept-resume <friend_id> --message-id <mid> --yes` | Accept a specific incoming attached-resume request |
+| `boss hr download-resume <friend_id> --message-id <mid> --output <path>` | Check access and download an already received attachment without overwriting files |
+| `boss hr greet ... --message <text> --yes` | Create a conversation and send first contact once, without changing read status |
 
 Preview the candidate parameters and message with `--dry-run`. Replace it with `--yes` only after the operator explicitly approves that candidate and message. MCP omits `yes` by default; agents must not infer approval, and a preview is not human authorization.
 
 `greet` atomically reserves the encrypted candidate/job pair locally and records a confirmed send. A lost response, process exit, or rate limit leaves the reservation in place and blocks automatic resending. Check `boss hr chat --job-id <id>` and use the official page if needed; do not delete the reservation to resend.
 
-Cleanup remains part of `greet`, not a separate command. A known zero unread count returns `not_needed`; without MQTT permission, cleanup returns `deferred`. With permission, a missing count does not block a receipt when the exact conversation and latest message ID can be resolved. An unresolved target or message ID returns `unknown` without publishing. Unknown counts in `chat` / `last-messages` remain `null`, not zero.
+`greet` only sends first contact. It does not open an MQTT connection or clear unread state. Success returns `sent=true`; if saving local state fails after sending, the error envelope preserves `error.details.sent=true`. Never resend because local bookkeeping failed. Unknown unread counts in `chat` / `last-messages` remain `null`, not zero.
 
-An independent MQTT session may disconnect the active webpage. Add `--allow-mqtt-session` before sending (MCP: `allow_mqtt_session=true`) only after the operator separately approves that risk. `--yes` approves the candidate and message, not this permission. Random client IDs do not guarantee same-account coexistence; the exact cause of webpage logout remains undetermined and must not be automatically probed with live accounts.
+### Accepting and downloading attached resumes
 
-MQTT parameters follow web v11308: a `ws-` prefix with 16 uppercase hexadecimal characters, MQTT 3.1, explicit `cleanSession=true`, and a 10-second connect timeout setting. The password and WebSocket subprotocol come from `get/wt`; handshake cookies use the native jar's domain/path selection for the server's `/chatws`, without overwriting `wt2`. Presence `uniqid` joins the second and first `__a` segments; `model` comes from `sid`, with missing values left empty. The UA uses native auth metadata or the CLI default when absent. Imported cookies without domain/path metadata cannot reproduce browser cookie selection exactly. Connection reuse is not implemented, and the heartbeat calculation is unchanged; parameter alignment does not establish webpage coexistence.
+Use `boss hr chatmsg <friend_id>` to identify the exact request. `accept-resume --message-id` takes the request message's `mid`, not a candidate or attachment ID. `--dry-run` previews the target offline without validating its current state; `--yes` requires explicit operator approval. Before one non-retried POST, the command checks the sender, dialog type, unprocessed status and current conversation. Only `code=0` with `zpData.status=0` produces `accepted=true`. Unknown results or additional platform confirmation require checking the official page, not automatic resubmission.
 
-`--read-receipt-timeout` defaults to 25 seconds (1–60). A private short-lived subprocess reuses the native auth store; the shared budget covers startup, lookups, and publish. Timeout kills and reaps the worker to prevent continued background requests, but cannot undo operations already received by the platform. MQTT QoS 1 publish acknowledgement completes cleanup with `read_state.status=published` and `partial_success=false`, without an unread-state readback. This confirms receipt publication, not that the webpage unread count was verified as zero; `cleared` is no longer returned. Ordinary cleanup failures return `partial_success=true`; auth, account risk, and rate limits return an error envelope preserving `error.details.sent=true`, with guidance in `hints.operator_actions`. Never resend a greeting because cleanup failed or to add MQTT permission.
+After acceptance, read the chat again and locate the received attachment card (`body.hyperLink.hyperLinkType` 1 or 9). Pass that **attachment message's mid**, not the request mid, to `boss hr download-resume <friend_id> --message-id <attachment_mid> --output ./resume.pdf`. The command supports ordinary BOSS conversations (`friendSource=0`), reads the attachment parameters and current conversation identity, then checks `preview/check.json`. Hidden or expired attachments are blocked. Preview unavailability alone does not prohibit downloading.
+
+Downloads use the fixed official `docdownload.zhipin.com` host and do not follow redirects or fetch arbitrary card URLs. The command never accepts a request, asks for a resume, changes email settings or starts MQTT. Files are limited to 20 MiB, identified as PDF/DOC/DOCX/PNG/JPEG, and require a matching output extension and an existing parent directory. Private files are published atomically without overwriting existing paths; temporary access credentials are not returned. File signature checks are not malware scanning.
+
+Both commands reuse native CLI authentication. This implementation follows static web v11308 code and is covered by offline regression tests for this consolidation, which do not establish availability for every account or risk-control scenario. The webpage also injects dynamic `sigx` for acceptance; the HTTP implementation does not fabricate fingerprints or automatically launch a browser to bypass rejection. MCP tools are `boss_hr_accept_resume` and `boss_hr_download_resume`. Acceptance, download, delivery/read status and unread cleanup are separate states.
 
 ## Resume & AI
 

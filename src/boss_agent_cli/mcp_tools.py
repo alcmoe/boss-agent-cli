@@ -109,6 +109,8 @@ _MCP_TOOL_COMPLIANCE_COMMAND_OVERRIDES = {
 	"boss_hr_exchange": "recruiter-resume",
 	"boss_hr_reply": "recruiter-reply",
 	"boss_hr_request_resume": "recruiter-request-resume",
+	"boss_hr_accept_resume": "recruiter-accept-resume",
+	"boss_hr_download_resume": "recruiter-download-resume",
 	"boss_hr_recommendations": "recruiter-recommendations",
 	"boss_hr_greet": "recruiter-greet",
 }
@@ -859,7 +861,7 @@ TOOLS = [
 	),
 	Tool(
 		name="boss_hr_greet",
-		description="招聘者模式：单次建立会话、发送首次招呼，并按需发送已读回执；published 表示 MQTT 发布已确认，不回读红点状态",
+		description="招聘者模式：单次建立会话、发送首次招呼；需操作者明确批准，不发送已读回执",
 		input_schema={
 			"type": "object",
 			"properties": {
@@ -872,8 +874,6 @@ TOOLS = [
 				"message": {"type": "string", "description": "首次招呼内容"},
 				"yes": {"type": "boolean", "default": False, "description": "人工确认位；只有操作者明确批准此候选人和话术后才置 true，不得自行推断或在确认失败后自动改为 true"},
 				"dry_run": {"type": "boolean", "default": False, "description": "只预览候选人和话术，不发送"},
-				"read_receipt_timeout": {"type": "number", "minimum": 1, "maximum": 60, "default": 25, "description": "发送后清红点的总预算（秒）"},
-				"allow_mqtt_session": {"type": "boolean", "default": False, "description": "允许清红点新建独立 MQTT 会话，可能挤掉网页连接；仅在操作者单独明确批准此风险后置 true，yes 不代表此授权"},
 			},
 			"required": ["geek_id", "job_id", "expect_id", "lid", "security_id", "message"],
 		},
@@ -981,6 +981,33 @@ TOOLS = [
 				"job_id": {"type": "string", "description": "职位 ID（online/offline 时必填）"},
 			},
 			"required": [],
+		},
+	),
+	Tool(
+		name="boss_hr_accept_resume",
+		description="招聘者模式：同意指定候选人的附件简历请求；仅在操作者明确批准后传 yes=true，不自动下载或重试",
+		input_schema={
+			"type": "object",
+			"properties": {
+				"friend_id": {"type": "integer", "minimum": 1, "description": "候选人会话 friend_id"},
+				"message_id": {"type": "integer", "minimum": 1, "description": "附件简历请求消息 mid"},
+				"yes": {"type": "boolean", "default": False, "description": "操作者已明确批准同意这条请求"},
+				"dry_run": {"type": "boolean", "default": False, "description": "只预览，不请求平台"},
+			},
+			"required": ["friend_id", "message_id"],
+		},
+	),
+	Tool(
+		name="boss_hr_download_resume",
+		description="招聘者模式：下载指定候选人已收到且允许访问的附件简历；不自动同意、不覆盖已有文件",
+		input_schema={
+			"type": "object",
+			"properties": {
+				"friend_id": {"type": "integer", "minimum": 1, "description": "候选人会话 friend_id"},
+				"message_id": {"type": "integer", "minimum": 1, "description": "已收到附件的消息 mid，不是请求 mid"},
+				"output": {"type": "string", "description": "本地输出文件路径，扩展名必须匹配附件格式"},
+			},
+			"required": ["friend_id", "message_id", "output"],
 		},
 	),
 	Tool(

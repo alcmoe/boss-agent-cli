@@ -140,20 +140,33 @@ boss crawl stop <run_id>
 | `boss hr candidates <keyword>` | 搜索和筛选候选人 |
 | `boss hr reply <friend_id> <message>` | 回复候选人消息 |
 | `boss hr request-resume <friend_id>` | 请求候选人分享附件简历 |
+| `boss hr accept-resume <friend_id> --message-id <mid> --yes` | 同意候选人发来的指定附件简历请求 |
+| `boss hr download-resume <friend_id> --message-id <mid> --output <文件路径>` | 检查权限后下载已收到的指定附件，不覆盖旧文件 |
 | `boss hr recommendations --job-id <encJobId>` | 读取推荐牛人完整卡片和首次开聊参数 |
-| `boss hr greet ... --message <话术> --yes` | 建立候选人会话、发送首次招呼，并在需要时处理会话红点 |
+| `boss hr greet ... --message <话术> --yes` | 建立候选人会话并单次发送首次招呼，不修改已读状态 |
 
 先在同一组候选人参数和话术后加 `--dry-run` 预览；操作者明确批准该候选人和话术后，才改为 `--yes` 发送。MCP 的 `yes` 默认不传，Agent 不得自行确认；预览本身不构成人工批准。
 
 `greet` 按候选人和招聘职位的加密 ID 在本地原子预约，成功后记录已发送；响应丢失、进程退出或限流时保留预约，禁止自动重发。使用 `boss hr chat --job-id <id>` 核对会话，必要时在官方页面处理，不要删除记录来重发。
 
-清红点仍是 `greet` 的收尾，不是独立命令。已知未读数为零时返回 `not_needed`；未授权 MQTT 时返回 `deferred`。授权后，即使未读数缺失，也会根据准确匹配的会话和最新消息 ID 发送一次已读回执；无法确定目标或消息 ID 时返回 `unknown`，不发送。`chat` / `last-messages` 中未知未读数仍保留为 `null`，不当作零。
+`greet` 只发送首次招呼，不建立 MQTT 连接、不清理红点。成功返回 `sent=true`；若发送后本地记录失败，错误信封仍在 `error.details.sent=true` 保留已发送事实，不能因此重发。`chat` / `last-messages` 中未知未读数保留为 `null`，不当作零。
 
-独立 MQTT 会话可能挤掉正在使用的网页连接。只有操作者单独批准此风险，才可在发送前加 `--allow-mqtt-session`（MCP：`allow_mqtt_session=true`）；`--yes` 仅批准候选人和话术，不包含这项授权。随机客户端 ID 不保证同账号连接共存，网页退出的具体原因尚未确定，不应以真实账号自动探测。
+### 接收与下载附件简历
 
-MQTT 参数参考网页 v11308：使用 `ws-` 加 16 位大写十六进制客户端 ID、MQTT 3.1、`cleanSession=true` 和 10 秒连接超时配置；密码及 WebSocket 子协议来自 `get/wt`，Cookie 则由原生 jar 按服务器域名和 `/chatws` 路径选择，不覆盖 `wt2`。上线包的 `uniqid` 来自 `__a` 第 2 段与第 1 段拼接，`model` 来自 `sid`，缺失时留空。UA 沿用原生认证信息，缺失时仍使用 CLI 默认值；已导入的 Cookie 若没有域名/路径元数据，不能宣称与浏览器实际请求完全一致。本次不实现连接复用，不改变心跳计算；参数对齐不代表已解决网页退出。
+先用 `boss hr chatmsg <friend_id>` 核对消息。`accept-resume` 的 `--message-id` 是“对方想发送附件简历”的请求消息 `mid`，不是候选人 ID，也不是附件 ID。先加 `--dry-run` 可离线预览目标（不验证消息状态）；操作者批准后才加 `--yes`。命令重新读取消息和当前会话，确认发送方、请求类型及未处理状态后，单次调用 `exchange/accept`，不自动重试写请求、不新建 MQTT。只有外层 `code=0` 且 `zpData.status=0` 才返回 `accepted=true`；异常或额外确认状态不能当作已同意，需在官方页面核对。
 
-`--read-receipt-timeout` 默认为 25 秒（1–60）。收尾使用私有短生命周期子进程和原生认证存储，总预算覆盖启动、查询及回执；超时后终止并回收进程，避免后台继续请求，但不能撤回已送达平台的操作。收到 MQTT QoS 1 的发布确认后返回 `read_state.status=published`、`partial_success=false`，结束收尾，不再回读红点。此结果表示回执已发送，不表示已核验网页未读数归零；不再返回 `cleared`。普通收尾失败返回 `partial_success=true`；认证、风控或限流返回错误信封并在 `error.details.sent=true` 保留已发送事实，操作者指引在 `hints.operator_actions`，不可因收尾失败或补授权重发招呼。
+同意后，再读取聊天记录，找到附件卡片（`body.hyperLink.hyperLinkType` 为 `1` 或 `9`）。将**附件消息的 mid** 交给下载命令，不能复用请求消息的 mid：
+
+```bash
+boss hr accept-resume <friend_id> --message-id <request_mid> --dry-run
+boss hr accept-resume <friend_id> --message-id <request_mid> --yes
+boss hr chatmsg <friend_id>
+boss hr download-resume <friend_id> --message-id <attachment_mid> --output ./resume.pdf
+```
+
+下载只支持普通 BOSS 会话（`friendSource=0`），从已收到的卡片读取 `id/encryptId`、`authType`，使用当前会话 `encryptUid` 检查 `preview/check.json`。不可见、过期或返回异常时停止；不能在线预览不等于不能下载。只访问固定的官方 `docdownload.zhipin.com` 地址，不请求卡片任意 URL，不跟随下载重定向、不修改邮箱、不自动同意或索要简历。最大 20 MiB，按文件内容识别 PDF、DOC、DOCX、PNG、JPEG；输出扩展名须匹配，父目录须已存在。文件以私有权限写入并原子发布，不覆盖已有文件，也不在结果中暴露临时下载凭据。文件签名识别不等于病毒检测，附件仍应视为不可信文件。
+
+两条命令均复用 CLI 原生认证。协议来自网页 v11308 静态代码，本次整合使用离线回归测试，不代表所有账号和风控场景均可用；网页的同意接口还注入动态 `sigx`，当前 HTTP 路径不伪造指纹，若被拒绝则停止，不自动启动浏览器绕过验证。MCP 对应 `boss_hr_accept_resume` / `boss_hr_download_resume`，同意与下载成功是两个独立状态，不等于对方已读或红点已清理。
 
 ## 简历与 AI
 

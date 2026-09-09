@@ -52,10 +52,11 @@ BOSS_JOB_EDIT_URL = _url("boss_job_edit")
 # ── 交换联系方式 ────────────────────────────────────
 BOSS_EXCHANGE_TEST_URL = _url("boss_exchange_test")
 BOSS_EXCHANGE_REQUEST_URL = _url("boss_exchange_request")
+BOSS_EXCHANGE_ACCEPT_URL = _url("boss_exchange_accept")
+BOSS_RESUME_PREVIEW_CHECK_URL = _url("boss_resume_preview_check")
+BOSS_RESUME_DOWNLOAD_URL = _url("boss_resume_download")
 BOSS_EXCHANGE_CONTENT_URL = _url("boss_exchange_content")
 BOSS_CHAT_REPLY_BLOCK_URL = f"{BASE_URL}/wapi/zpblock/chat/reply/block/v2"
-BOSS_BATCH_REQUESTS_URL = _url("boss_batch_requests")
-BOSS_WS_CONFIG_URL = _url("boss_ws_config")
 
 # ── 面试 ────────────────────────────────────────────
 BOSS_INTERVIEW_LIST_URL = _url("boss_interview_list")

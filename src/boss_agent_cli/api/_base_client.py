@@ -139,12 +139,8 @@ class _BaseHttpClient:
 
 	# ── httpx request with retry (low-risk ops) ──────────────────────
 
-	def _request(self, method: str, url: str, *, retry: bool = True, deadline: float | None = None, **kwargs: Any) -> dict[str, Any]:
+	def _request(self, method: str, url: str, *, retry: bool = True, **kwargs: Any) -> dict[str, Any]:
 		"""httpx 请求，循环重试（最多 _MAX_RETRIES 次）。"""
-		from boss_agent_cli.api.httpx_helpers import remaining_timeout
-
-		if deadline is not None:
-			retry = False
 		# extra_headers overrides yaml-driven defaults from _headers_for(url); candidate
 		# client never passes it, so the pop is a no-op there (behavior preserved).
 		extra_headers_override: dict[str, str] = kwargs.pop("extra_headers", {})
@@ -156,19 +152,12 @@ class _BaseHttpClient:
 
 			add_stoken_to_get_params(method, kwargs, stoken)
 
-			if deadline is None:
-				self._throttle.wait()
-			else:
-				self._throttle.wait(timeout=remaining_timeout(deadline))
-				kwargs["timeout"] = remaining_timeout(deadline)
-				kwargs["follow_redirects"] = False
+			self._throttle.wait()
 
 			headers = {**self._headers_for(url), **extra_headers_override}
 			resp = client.request(method, url, headers=headers, **kwargs)
 			self._throttle.mark()
 			self._merge_cookies(resp)
-			if deadline is not None:
-				remaining_timeout(deadline)
 
 			# 403 或安全验证 → 刷新 token 重试
 			if resp.status_code == 403 or "安全验证" in resp.text:

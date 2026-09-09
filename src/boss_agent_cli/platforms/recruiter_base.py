@@ -8,6 +8,7 @@ RecruiterPlatform 接口定义跨平台招聘者侧统一契约
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from pathlib import Path
 from types import TracebackType
 from typing import Any
 
@@ -75,7 +76,7 @@ class RecruiterPlatform(ABC):
 	# ── 候选人列表与筛选 ────────────────────────────────
 
 	@abstractmethod
-	def friend_list(self, page: int = 1, label_id: int = 0, job_id: str | None = None, *, deadline: float | None = None) -> dict[str, Any]:
+	def friend_list(self, page: int = 1, label_id: int = 0, job_id: str | None = None) -> dict[str, Any]:
 		"""沟通列表（按标签/职位筛选）。"""
 
 	@abstractmethod
@@ -134,7 +135,7 @@ class RecruiterPlatform(ABC):
 		"""获取候选人聊天信息。"""
 		raise NotImplementedError(f"{self.name} does not implement chat_geek_info")
 
-	def last_messages(self, friend_ids: list[int], *, deadline: float | None = None) -> dict[str, Any]:
+	def last_messages(self, friend_ids: list[int]) -> dict[str, Any]:
 		"""获取最近消息。"""
 		raise NotImplementedError(f"{self.name} does not implement last_messages")
 
@@ -169,13 +170,17 @@ class RecruiterPlatform(ABC):
 		"""
 		raise NotImplementedError(f"{self.name} does not implement exchange_request_by_friend")
 
+	def accept_resume_by_friend(self, friend_id: int, message_id: int) -> dict[str, Any]:
+		"""同意指定候选人发来的附件简历请求，不自动重试。"""
+		raise NotImplementedError(f"{self.name} does not implement accept_resume_by_friend")
+
 	def exchange_content(self, uid: int) -> dict[str, Any]:
 		"""获取交换内容。"""
 		raise NotImplementedError(f"{self.name} does not implement exchange_content")
 
-	def mark_read(self, *, peer_uid: int, message_id: int, user_source: int = 0, deadline: float | None = None, allow_mqtt_session: bool = False) -> dict[str, Any]:
-		"""发送已读回执；传输成功不代表未读状态已更新。"""
-		raise NotImplementedError(f"{self.name} does not implement mark_read")
+	def download_resume_by_friend(self, friend_id: int, message_id: int, output: Path) -> dict[str, Any]:
+		"""下载指定候选人已发送且允许访问的附件简历。"""
+		raise NotImplementedError(f"{self.name} does not implement download_resume_by_friend")
 
 	def interview_list(self) -> dict[str, Any]:
 		"""面试列表。"""

@@ -1058,8 +1058,15 @@ SCHEMA_DATA = {
 				"greet": {
 					"--yes": {"type": "bool", "default": False, "description": "操作者明确批准该候选人和话术后才可发送"},
 					"--dry-run": {"type": "bool", "default": False, "description": "只预览，不发送"},
-					"--read-receipt-timeout": {"type": "float", "default": 25, "description": "清红点总预算（秒，1–60）"},
-					"--allow-mqtt-session": {"type": "bool", "default": False, "description": "单独批准清红点新建 MQTT 会话，可能导致网页掉线"},
+				},
+				"accept-resume": {
+					"--message-id": {"type": "int", "required": True, "description": "候选人发来的附件简历请求 mid"},
+					"--yes": {"type": "bool", "default": False, "description": "操作者明确批准同意这条请求"},
+					"--dry-run": {"type": "bool", "default": False, "description": "只预览，不请求平台"},
+				},
+				"download-resume": {
+					"--message-id": {"type": "int", "required": True, "description": "已收到的附件消息 mid，不是请求 mid"},
+					"--output": {"type": "string", "required": True, "description": "本地输出文件路径，不覆盖已有文件"},
 				},
 			},
 			"subcommands": {
@@ -1072,8 +1079,10 @@ SCHEMA_DATA = {
 				"candidates": "搜索候选人",
 				"reply": "回复候选人消息",
 				"request-resume": "请求候选人分享附件简历",
+				"accept-resume": "同意指定候选人的附件简历请求（需 --yes），不下载附件",
+				"download-resume": "检查权限并下载已收到的附件简历，不自动同意请求",
 				"recommendations": "读取推荐牛人完整卡片和首次开聊参数",
-				"greet": "单次建立候选人会话、发送首次招呼并按需发送已读回执（需 --yes）；published 表示 MQTT 发布已确认，不回读红点状态",
+				"greet": "单次建立候选人会话并发送首次招呼（需 --yes），不修改已读状态",
 			},
 		},
 	},
