@@ -13,7 +13,7 @@ from boss_agent_cli.auth.manager import AuthManager, AuthRequired, TokenRefreshF
 from boss_agent_cli.cache.store import CacheStore
 from boss_agent_cli.compliance import require_compliance_allowed
 from boss_agent_cli.commands._recruiter_platform import get_recruiter_platform_instance
-from boss_agent_cli.display import handle_auth_errors, handle_error_output, handle_output, handle_platform_error_output
+from boss_agent_cli.display import error_contract_for_code, handle_auth_errors, handle_error_output, handle_output, handle_platform_error_output
 
 
 @click.command("recommendations")
@@ -50,6 +50,9 @@ def _send_error(ctx: click.Context, *, code: str, job_id: str, details: dict[str
 	elif code == "ACCOUNT_RISK":
 		action = "账号已触发风控，停止自动化访问；回到 BOSS 直聘官方页面处理"
 		hints = {"operator_actions": [action, "禁止重新发送本次招呼"]}
+	elif code == "ENVIRONMENT_RISK":
+		action = (error_contract_for_code(code)[1] or "停止自动化访问") + "；不要自动重发本次招呼"
+		hints = {"operator_actions": [action, "不要刷新 Token、重新登录或自动重试该请求"]}
 	else:
 		action = f"先用 {check} 确认该候选人会话是否已建立；不要自动重发"
 		hints = {"operator_actions": [message, action], "next_actions": [check]}

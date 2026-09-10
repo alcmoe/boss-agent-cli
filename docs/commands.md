@@ -155,6 +155,8 @@ boss crawl stop <run_id>
 
 先用 `boss hr chatmsg <friend_id>` 核对消息。`accept-resume` 的 `--message-id` 是“对方想发送附件简历”的请求消息 `mid`，不是候选人 ID，也不是附件 ID。先加 `--dry-run` 可离线预览目标（不验证消息状态）；操作者批准后才加 `--yes`。命令重新读取消息和当前会话，确认发送方、请求类型及未处理状态后，单次调用 `exchange/accept`，不自动重试写请求、不新建 MQTT。只有外层 `code=0` 且 `zpData.status=0` 才返回 `accepted=true`；异常或额外确认状态不能当作已同意，需在官方页面核对。
 
+未确认的同意结果使用 `RESUME_ACCEPT_RESULT_UNKNOWN`，保留 `accepted=null`、`recoverable=false`，禁止自动重发；已识别的登录或风险错误仍保留各自错误码，也不自动重试同意操作。未加 `--yes` 时返回 `CONFIRMATION_REQUIRED`，先取得对具体操作的明确批准，不能由 Agent 自行补确认。
+
 同意后，再读取聊天记录，找到附件卡片（`body.hyperLink.hyperLinkType` 为 `1` 或 `9`）。将**附件消息的 mid** 交给下载命令，不能复用请求消息的 mid：
 
 ```bash
@@ -164,7 +166,9 @@ boss hr chatmsg <friend_id>
 boss hr download-resume <friend_id> --message-id <attachment_mid> --output ./resume.pdf
 ```
 
-下载只支持普通 BOSS 会话（`friendSource=0`），从已收到的卡片读取 `id/encryptId`、`authType`，使用当前会话 `encryptUid` 检查 `preview/check.json`。不可见、过期或返回异常时停止；不能在线预览不等于不能下载。只访问固定的官方 `docdownload.zhipin.com` 地址，不请求卡片任意 URL，不跟随下载重定向、不修改邮箱、不自动同意或索要简历。最大 20 MiB，按文件内容识别 PDF、DOC、DOCX、PNG、JPEG；输出扩展名须匹配，父目录须已存在。文件以私有权限写入并原子发布，不覆盖已有文件，也不在结果中暴露临时下载凭据。文件签名识别不等于病毒检测，附件仍应视为不可信文件。
+下载只支持普通 BOSS 会话（`friendSource=0`），从已收到的卡片读取 `id/encryptId`、`authType`，使用当前会话 `encryptUid` 检查 `preview/check.json`。不可见、过期或返回异常时停止；不能在线预览不等于不能下载。只访问固定的官方 `docdownload.zhipin.com` 地址，不请求卡片任意 URL，不跟随下载重定向、不修改邮箱、不自动同意或索要简历。最大 20 MiB，按文件内容识别 PDF、DOC、DOCX、PNG、JPEG；输出扩展名须匹配，父目录须已存在。以 `O_CREAT|O_EXCL`、私有权限创建文件，不覆盖已有文件，不依赖硬链接；写入异常时清理本次创建的未完成文件，但不保证进程被强制终止后的清理。结果不暴露临时下载凭据。文件签名识别不等于病毒检测，附件仍应视为不可信文件。
+
+二进制下载返回 HTTP 401/403 时使用 `AUTH_REQUIRED`。下载中的 `AUTH_REQUIRED`、`TOKEN_REFRESH_FAILED`、`NETWORK_ERROR` 按 `boss schema` 返回恢复指引，处理登录或网络问题后可重试下载；未识别的平台错误映射为 `NETWORK_ERROR`。`ACCOUNT_RISK`、`ENVIRONMENT_RISK` 仍须停止自动化，不自动登录、刷新或重试。下载可恢复不代表可以重发同意请求。
 
 两条命令均复用 CLI 原生认证。协议来自网页 v11308 静态代码，本次整合使用离线回归测试，不代表所有账号和风控场景均可用；网页的同意接口还注入动态 `sigx`，当前 HTTP 路径不伪造指纹，若被拒绝则停止，不自动启动浏览器绕过验证。MCP 对应 `boss_hr_accept_resume` / `boss_hr_download_resume`，同意与下载成功是两个独立状态，不等于对方已读或红点已清理。
 

@@ -1,4 +1,5 @@
 """招聘者 — 同意接收候选人附件简历。"""
+
 from typing import Any
 
 import click
@@ -9,7 +10,7 @@ from boss_agent_cli.api.recruiter_resume import ResumeValidationError
 from boss_agent_cli.auth.manager import AuthManager, AuthRequired, TokenRefreshFailed
 from boss_agent_cli.commands._recruiter_platform import get_recruiter_platform_instance
 from boss_agent_cli.compliance import require_compliance_allowed
-from boss_agent_cli.display import handle_auth_errors, handle_error_output, handle_output
+from boss_agent_cli.display import error_contract_for_code, handle_auth_errors, handle_error_output, handle_output
 
 
 @click.command("accept-resume")
@@ -26,10 +27,23 @@ def accept_resume_cmd(ctx: click.Context, friend_id: int, message_id: int, yes: 
 	command = "recruiter-accept-resume"
 	data: dict[str, Any] = {"friend_id": friend_id, "message_id": message_id, "accepted": False}
 	if dry_run:
-		handle_output(ctx, command, {**data, "dry_run": True}, hints={"operator_actions": ["预览未验证请求状态；明确批准该候选人的这条请求后才可加 --yes"]})
+		handle_output(
+			ctx,
+			command,
+			{**data, "dry_run": True},
+			hints={"operator_actions": ["预览未验证请求状态；明确批准该候选人的这条请求后才可加 --yes"]},
+		)
 		return
 	if not yes:
-		handle_error_output(ctx, command, code="CONFIRMATION_REQUIRED", message="尚未获得操作者对这条附件简历请求的明确批准")
+		recoverable, recovery_action = error_contract_for_code("CONFIRMATION_REQUIRED")
+		handle_error_output(
+			ctx,
+			command,
+			code="CONFIRMATION_REQUIRED",
+			message="尚未获得操作者对这条附件简历请求的明确批准",
+			recoverable=recoverable,
+			recovery_action=recovery_action,
+		)
 		return
 	auth = AuthManager(ctx.obj["data_dir"], logger=ctx.obj["logger"], platform=ctx.obj.get("platform", "zhipin"))
 	with get_recruiter_platform_instance(ctx, auth) as platform:
@@ -40,28 +54,86 @@ def accept_resume_cmd(ctx: click.Context, friend_id: int, message_id: int, yes: 
 			handle_error_output(ctx, command, code="INVALID_PARAM", message=str(exc), details=data)
 			return
 		except NotImplementedError:
-			handle_error_output(ctx, command, code="PLATFORM_NOT_SUPPORTED", message="当前平台不支持同意附件简历请求", details=data)
+			handle_error_output(
+				ctx, command, code="PLATFORM_NOT_SUPPORTED", message="当前平台不支持同意附件简历请求", details=data
+			)
 			return
 		except (AuthRequired, RecruiterAuthError):
-			handle_error_output(ctx, command, code="AUTH_REQUIRED", message="登录态不可用，请在官方页面核对后重新登录；不要自动重试", recoverable=False, details={**data, "accepted": None}, hints={"operator_actions": ["登录态不可用，请在官方页面核对后重新登录；不要自动重试"]})
+			handle_error_output(
+				ctx,
+				command,
+				code="AUTH_REQUIRED",
+				message="登录态不可用，请在官方页面核对后重新登录；不要自动重试",
+				recoverable=False,
+				details={**data, "accepted": None},
+				hints={"operator_actions": ["登录态不可用，请在官方页面核对后重新登录；不要自动重试"]},
+			)
 			return
 		except TokenRefreshFailed:
-			handle_error_output(ctx, command, code="TOKEN_REFRESH_FAILED", message="登录态刷新失败，停止本次操作；不要自动重试", recoverable=False, details={**data, "accepted": None}, hints={"operator_actions": ["登录态刷新失败，停止本次操作；不要自动重试"]})
+			handle_error_output(
+				ctx,
+				command,
+				code="TOKEN_REFRESH_FAILED",
+				message="登录态刷新失败，停止本次操作；不要自动重试",
+				recoverable=False,
+				details={**data, "accepted": None},
+				hints={"operator_actions": ["登录态刷新失败，停止本次操作；不要自动重试"]},
+			)
 			return
 		except AccountRiskError:
-			handle_error_output(ctx, command, code="ACCOUNT_RISK", message="账号已触发风控，停止自动化访问并在官方页面处理", recoverable=False, details={**data, "accepted": None}, hints={"operator_actions": ["账号已触发风控，停止自动化访问并在官方页面处理"]})
+			handle_error_output(
+				ctx,
+				command,
+				code="ACCOUNT_RISK",
+				message="账号已触发风控，停止自动化访问并在官方页面处理",
+				recoverable=False,
+				details={**data, "accepted": None},
+				hints={"operator_actions": ["账号已触发风控，停止自动化访问并在官方页面处理"]},
+			)
 			return
 		except Exception:
 			# 写请求响应丢失时不能宣称失败或建议重发，也不透传可能含凭据的异常。
-			handle_error_output(ctx, command, code="NETWORK_ERROR", message="无法确认同意结果，请在官方页面核对，不要自动重试", recoverable=False, details={**data, "accepted": None})
+			_, recovery_action = error_contract_for_code("RESUME_ACCEPT_RESULT_UNKNOWN")
+			handle_error_output(
+				ctx,
+				command,
+				code="RESUME_ACCEPT_RESULT_UNKNOWN",
+				message="无法确认同意结果，请在官方页面核对，不要自动重试",
+				recoverable=False,
+				recovery_action=recovery_action,
+				details={**data, "accepted": None},
+			)
 			return
 		if not platform.is_success(result):
 			code, _ = platform.parse_error(result)
-			handle_error_output(ctx, command, code=code, message="同意附件简历请求未获成功确认，请在官方页面核对", recoverable=False, details={**data, "accepted": None})
+			code = code if code != "UNKNOWN" else "RESUME_ACCEPT_RESULT_UNKNOWN"
+			handle_error_output(
+				ctx,
+				command,
+				code=code,
+				message="同意附件简历请求未获成功确认，请在官方页面核对",
+				recoverable=False,
+				recovery_action="在官方页面核对请求状态，不要自动重试",
+				details={**data, "accepted": None},
+			)
 			return
 		response = platform.unwrap_data(result)
 		status = response.get("status") if isinstance(response, dict) else None
 		if type(status) is not int or status != 0:
-			handle_error_output(ctx, command, code="UNKNOWN", message="平台未确认同意完成，可能需要额外操作；请在官方页面核对", recoverable=False, details={**data, "accepted": None, "status": status if type(status) is int else None})
+			_, recovery_action = error_contract_for_code("RESUME_ACCEPT_RESULT_UNKNOWN")
+			handle_error_output(
+				ctx,
+				command,
+				code="RESUME_ACCEPT_RESULT_UNKNOWN",
+				message="平台未确认同意完成，可能需要额外操作；请在官方页面核对",
+				recoverable=False,
+				recovery_action=recovery_action,
+				details={**data, "accepted": None, "status": status if type(status) is int else None},
+			)
 			return
-		handle_output(ctx, command, {**data, "accepted": True}, hints={"next_actions": [f"boss hr chatmsg {friend_id} — 查看后续附件消息；同意不代表附件已下载"]})
+		handle_output(
+			ctx,
+			command,
+			{**data, "accepted": True},
+			hints={"next_actions": [f"boss hr chatmsg {friend_id} — 查看后续附件消息；同意不代表附件已下载"]},
+		)

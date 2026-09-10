@@ -256,11 +256,11 @@ def test_recruiter_refresh_passes_browser_source_to_auth_manager(mock_http_clien
 	assert auth.refresh_sources == ["stored-cookie"]
 
 
-@pytest.mark.parametrize("code", [37, 9])
-def test_start_chat_never_refreshes_or_retries(code):
+@pytest.mark.parametrize("code,message", [(37, ""), (37, "stoken expired"), (37, "环境异常"), (9, "")])
+def test_start_chat_never_refreshes_or_retries(code, message):
 	auth = FakeAuthManager()
 	client = BossRecruiterClient(auth, browser_source="stored-cookie")
-	http_client = FakeHttpxClient([FakeResponse(payload={"code": code})])
+	http_client = FakeHttpxClient([FakeResponse(payload={"code": code, "message": message})])
 	client._client = http_client
 	client._throttle.wait = lambda: None
 	client._throttle.mark = lambda: None

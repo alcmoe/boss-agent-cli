@@ -13,9 +13,42 @@ from boss_agent_cli.api import recruiter_endpoints as ep
 from boss_agent_cli.api.client import AccountRiskError
 from boss_agent_cli.api.recruiter_client import BossRecruiterClient, RecruiterAuthError
 from boss_agent_cli.auth.manager import AuthRequired, TokenRefreshFailed
+from boss_agent_cli.display import error_contract_for_code
 from boss_agent_cli.main import cli
 from boss_agent_cli.mcp_args import _build_args
 from boss_agent_cli.platforms.zhipin_recruiter import BossRecruiterPlatform
+
+
+def test_recommendations_cli_returns_full_cards() -> None:
+	client = MagicMock()
+	cards = {"geekList": [{"geekName": "测试候选人", "encryptGeekId": "geek", "securityId": "security"}], "hasMore": True}
+	client.recommend_geeks.return_value = {"code": 0, "zpData": cards}
+	with patch("boss_agent_cli.commands.recruiter.recommendations.AuthManager"), patch("boss_agent_cli.commands.recruiter.recommendations.get_recruiter_platform_instance") as factory:
+		factory.return_value.__enter__.return_value = BossRecruiterPlatform(client)
+		result = CliRunner().invoke(cli, ["--json", "hr", "recommendations", "--job-id", "job", "--page", "2"])
+	assert result.exit_code == 0
+	payload = json.loads(result.output)
+	assert payload["ok"] is True
+	assert payload["data"] == cards
+	assert payload["command"] == "recruiter-recommendations"
+	client.recommend_geeks.assert_called_once_with("job", page=2)
+	client.start_chat.assert_not_called()
+
+
+@pytest.mark.parametrize("response,code", [({"code": 7}, "AUTH_REQUIRED"), ({"code": 37, "message": "环境异常"}, "ENVIRONMENT_RISK")])
+def test_recommendations_cli_reports_platform_failure(response: dict[str, Any], code: str) -> None:
+	client = MagicMock()
+	client.recommend_geeks.return_value = response
+	with patch("boss_agent_cli.commands.recruiter.recommendations.AuthManager"), patch("boss_agent_cli.commands.recruiter.recommendations.get_recruiter_platform_instance") as factory:
+		factory.return_value.__enter__.return_value = BossRecruiterPlatform(client)
+		result = CliRunner().invoke(cli, ["--json", "hr", "recommendations", "--job-id", "job"])
+	assert result.exit_code == 1
+	payload = json.loads(result.output)
+	assert payload["ok"] is False
+	assert payload["error"]["code"] == code
+	assert (payload["error"]["recoverable"], payload["error"]["recovery_action"]) == error_contract_for_code(code)
+	client.recommend_geeks.assert_called_once_with("job", page=1)
+	client.start_chat.assert_not_called()
 
 
 def test_mcp_greet_confirmation_is_optional_and_not_coerced() -> None:
@@ -190,6 +223,25 @@ def test_recruiter_reservation_is_atomic_and_separate_from_candidate_records(tmp
 		first.record_recruiter_greet("geek", "job")
 		assert second.claim_recruiter_greet("geek", "job") == "sent"
 		assert second.claim_recruiter_greet("another-geek", "job") is None
+
+
+@pytest.mark.parametrize("message", ["访问环境存在异常", "环境异常", ""])
+def test_greet_environment_risk_does_not_suggest_more_requests(
+	greeting_args: list[str], greeting_platform: MagicMock, message: str,
+) -> None:
+	greeting_platform.start_chat.return_value = {"code": 37, "message": message}
+	result = CliRunner().invoke(cli, greeting_args + ["--yes"])
+	body = json.loads(result.output)
+	assert result.exit_code == 1
+	assert body["error"]["code"] == "ENVIRONMENT_RISK"
+	assert body["error"]["recoverable"] is False
+	assert body["error"]["details"]["sent"] is None
+	assert error_contract_for_code("ENVIRONMENT_RISK")[1] in body["error"]["recovery_action"]
+	assert "不要自动重发" in body["error"]["recovery_action"]
+	assert not body["hints"].get("next_actions")
+	assert "boss hr chat" not in json.dumps(body["hints"])
+	greeting_platform.start_chat.assert_called_once()
+	greeting_platform.friend_list.assert_not_called()
 
 
 

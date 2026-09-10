@@ -1,5 +1,6 @@
 from io import BytesIO
 import json
+import os
 from unittest.mock import MagicMock, patch
 from zipfile import ZipFile
 
@@ -10,6 +11,9 @@ import pytest
 from boss_agent_cli.api import recruiter_endpoints as ep
 from boss_agent_cli.api.recruiter_client import BossRecruiterClient, RecruiterAuthError
 from boss_agent_cli.api.recruiter_resume import ResumeValidationError, attachment_params, save_resume
+from boss_agent_cli.auth.manager import AuthRequired
+from boss_agent_cli.commands.schema import SCHEMA_DATA
+from boss_agent_cli.display import error_contract_for_code
 from boss_agent_cli.main import cli
 from boss_agent_cli.mcp_args import _build_args
 from boss_agent_cli.platforms.zhipin_recruiter import BossRecruiterPlatform
@@ -129,12 +133,23 @@ def test_download_denied_before_binary_request(tmp_path, detail):
 	assert not list(tmp_path.iterdir())
 
 
-@pytest.mark.parametrize("status,content", [(302, b""), (403, b"denied"), (200, b"<html>login</html>"), (200, b'{"code":7}'), (200, b"")])
+@pytest.mark.parametrize("status,content", [(302, b""), (200, b"<html>login</html>"), (200, b'{"code":7}'), (200, b"")])
 def test_download_rejects_redirects_and_non_files(tmp_path, status, content):
 	client, transport, requests = _download_client(content, status)
 	with transport, pytest.raises(ResumeValidationError):
 		client.download_resume_by_friend(123, 456, tmp_path / "resume.pdf")
 	assert len(requests) == 1
+	assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_download_binary_auth_failure_is_not_invalid_param(tmp_path, status):
+	client, transport, requests = _download_client(b"private-error", status)
+	with transport, pytest.raises(AuthRequired):
+		client.download_resume_by_friend(123, 456, tmp_path / "resume.pdf")
+	assert len(requests) == 1
+	client._throttle.mark.assert_called_once()
+	client._browser_request.assert_not_called()
 	assert not list(tmp_path.iterdir())
 
 
@@ -162,6 +177,46 @@ def test_save_resume_no_overwrite_and_no_temporary_leftovers(tmp_path):
 		save_resume(httpx.Response(200, content=b"%PDF-1.7"), output)
 	assert output.read_bytes() == b"original"
 	assert list(tmp_path.iterdir()) == [output]
+
+
+def test_save_resume_does_not_need_hard_links(tmp_path):
+	output = tmp_path / "resume.pdf"
+	with patch("boss_agent_cli.api.recruiter_resume.os.link", side_effect=OSError("unsupported")) as link:
+		save_resume(httpx.Response(200, content=b"%PDF-1.7"), output)
+	link.assert_not_called()
+	assert output.read_bytes() == b"%PDF-1.7"
+	assert output.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("error_type", [OSError, KeyboardInterrupt])
+def test_save_resume_removes_partial_file_and_closes_descriptor(tmp_path, error_type):
+	output = tmp_path / "resume.pdf"
+	descriptors = []
+	real_open = open
+
+	def failing_open(fd, *args, **kwargs):
+		descriptors.append(fd)
+		stream = real_open(fd, *args, **kwargs)
+		stream.write(b"partial")
+		stream.close()
+		raise error_type("write interrupted")
+
+	with patch("boss_agent_cli.api.recruiter_resume.open", side_effect=failing_open), pytest.raises(error_type):
+		save_resume(httpx.Response(200, content=b"%PDF-1.7"), output)
+	assert not list(tmp_path.iterdir())
+	with pytest.raises(OSError):
+		os.fstat(descriptors[0])
+
+
+def test_save_resume_never_follows_existing_symlink(tmp_path):
+	target = tmp_path / "original.pdf"
+	target.write_bytes(b"original")
+	output = tmp_path / "resume.pdf"
+	output.symlink_to(target)
+	with pytest.raises(FileExistsError):
+		save_resume(httpx.Response(200, content=b"%PDF-1.7"), output)
+	assert output.is_symlink()
+	assert target.read_bytes() == b"original"
 
 
 def test_save_resume_size_and_extension_limits(tmp_path):
@@ -198,7 +253,9 @@ def _invoke(*args):
 def test_accept_confirmation_and_preview_do_not_access_auth():
 	with patch("boss_agent_cli.commands.recruiter.accept_resume.AuthManager") as auth:
 		result = _invoke("accept-resume", "123", "--message-id", "456")
-		assert json.loads(result.output)["error"]["code"] == "CONFIRMATION_REQUIRED"
+		error = json.loads(result.output)["error"]
+		assert error["code"] == "CONFIRMATION_REQUIRED"
+		assert (error["recoverable"], error["recovery_action"]) == error_contract_for_code("CONFIRMATION_REQUIRED")
 		result = _invoke("accept-resume", "123", "--message-id", "456", "--dry-run")
 		assert json.loads(result.output)["data"]["accepted"] is False
 		auth.assert_not_called()
@@ -213,6 +270,11 @@ def test_accept_requires_both_success_codes(status, success):
 		platform.unwrap_data.side_effect = lambda response: response["zpData"]
 		result = _invoke("accept-resume", "123", "--message-id", "456", "--yes")
 		assert json.loads(result.output)["ok"] is success
+		if not success:
+			error = json.loads(result.output)["error"]
+			assert error["code"] == "RESUME_ACCEPT_RESULT_UNKNOWN"
+			assert error["details"]["accepted"] is None
+			assert (error["recoverable"], error["recovery_action"]) == error_contract_for_code(error["code"])
 		platform.accept_resume_by_friend.assert_called_once_with(123, 456)
 
 
@@ -222,6 +284,7 @@ def test_accept_response_decode_failure_is_unknown_and_redacted():
 		platform.accept_resume_by_friend.side_effect = ValueError("private-token-in-response")
 		result = _invoke("accept-resume", "123", "--message-id", "456", "--yes")
 		assert json.loads(result.output)["error"]["details"]["accepted"] is None
+		assert json.loads(result.output)["error"]["code"] == "RESUME_ACCEPT_RESULT_UNKNOWN"
 		assert "private-token" not in result.output
 		platform.accept_resume_by_friend.assert_called_once()
 
@@ -238,7 +301,7 @@ def test_platform_adapter_and_mcp_mapping(tmp_path):
 	assert _build_args("boss_hr_download_resume", {"friend_id": 123, "message_id": 456, "output": "resume.pdf"}) == ["hr", "download-resume", "123", "--message-id", "456", "--output", "resume.pdf"]
 
 
-@pytest.mark.parametrize("status,body", [(403, "denied"), (200, '{"code":9}'), (200, '{"code":37}'), (302, "redirect")])
+@pytest.mark.parametrize("status,body", [(403, "denied"), (200, '{"code":9}'), (200, '{"code":37}'), (200, '{"code":37,"message":"stoken expired"}'), (200, '{"code":37,"message":"环境异常"}'), (302, "redirect")])
 def test_accept_native_transport_does_not_retry_or_refresh(status, body):
 	client = _client()
 	client._auth = MagicMock()
@@ -277,6 +340,9 @@ def test_download_cli_redacts_http_errors():
 		platform.download_resume_by_friend.side_effect = httpx.ReadTimeout("https://example.invalid/?d=secret-value")
 		result = _invoke("download-resume", "123", "--message-id", "456", "--output", "resume.pdf")
 		assert json.loads(result.output)["ok"] is False
+		error = json.loads(result.output)["error"]
+		assert error["code"] == "NETWORK_ERROR"
+		assert (error["recoverable"], error["recovery_action"]) == error_contract_for_code("NETWORK_ERROR")
 		assert "secret-value" not in result.output
 
 
@@ -312,10 +378,46 @@ def test_resume_auth_and_risk_failures_stop_without_leaking(action, error_type, 
 		result = _invoke(action.replace("_", "-"), "123", "--message-id", "456", *args)
 		error = json.loads(result.output)["error"]
 		assert error["code"] == code
-		assert error["recoverable"] is False
+		if action == "download_resume" and code != "ACCOUNT_RISK":
+			assert (error["recoverable"], error["recovery_action"]) == error_contract_for_code(code)
+		else:
+			assert error["recoverable"] is False
 		assert "private-token" not in result.output
 		if action == "accept_resume":
 			assert error["details"]["accepted"] is None
+		method.assert_called_once()
+
+
+@pytest.mark.parametrize("action", ["accept_resume", "download_resume"])
+@pytest.mark.parametrize("response,code", [
+	({"code": -1, "message": "private-token"}, "UNKNOWN"),
+	({"code": 7}, "AUTH_REQUIRED"),
+	({"code": 37, "message": "stoken expired"}, "TOKEN_REFRESH_FAILED"),
+	({"code": 37, "message": "环境异常"}, "ENVIRONMENT_RISK"),
+	({"code": 37}, "ENVIRONMENT_RISK"),
+	({"code": 36}, "ACCOUNT_RISK"),
+])
+def test_resume_platform_errors_use_declared_codes_and_safe_recovery(action, response, code):
+	module = "boss_agent_cli.commands.recruiter." + action
+	client = MagicMock()
+	method = getattr(client, action + "_by_friend")
+	method.return_value = response
+	with patch(module + ".AuthManager"), patch(module + ".get_recruiter_platform_instance") as factory:
+		factory.return_value.__enter__.return_value = BossRecruiterPlatform(client)
+		args = ["--yes"] if action == "accept_resume" else ["--output", "resume.pdf"]
+		result = _invoke(action.replace("_", "-"), "123", "--message-id", "456", *args)
+		error = json.loads(result.output)["error"]
+		if code == "UNKNOWN":
+			code = "RESUME_ACCEPT_RESULT_UNKNOWN" if action == "accept_resume" else "NETWORK_ERROR"
+		assert error["code"] == code
+		assert code in SCHEMA_DATA["error_codes"]
+		assert "private-token" not in result.output
+		if action == "accept_resume":
+			assert error["details"]["accepted"] is None
+			assert error["recoverable"] is False
+			assert "不要自动重试" in error["recovery_action"]
+		else:
+			assert (error["recoverable"], error["recovery_action"]) == error_contract_for_code(code)
 		method.assert_called_once()
 
 

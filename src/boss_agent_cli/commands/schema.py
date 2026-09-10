@@ -1128,9 +1128,14 @@ SCHEMA_DATA = {
 	},
 	"error_codes": {
 		"CONFIRMATION_REQUIRED": {
-			"message": "尚未获得操作者对该候选人和话术的明确批准",
+			"message": "尚未获得操作者对本次操作的明确批准",
 			"recoverable": True,
-			"recovery_action": "确认候选人和话术后重新执行并加 --yes",
+			"recovery_action": "确认操作目标与内容后重新执行并加 --yes",
+		},
+		"RESUME_ACCEPT_RESULT_UNKNOWN": {
+			"message": "同意附件简历请求的结果未确认，禁止自动重试",
+			"recoverable": False,
+			"recovery_action": "在官方页面核对请求状态，不要自动重试",
 		},
 		"GREET_RESULT_UNKNOWN": {
 			"message": "首次招呼状态未确认，禁止自动重发",

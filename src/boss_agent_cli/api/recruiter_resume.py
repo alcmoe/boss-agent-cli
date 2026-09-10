@@ -2,12 +2,13 @@
 from io import BytesIO
 import os
 from pathlib import Path
-import tempfile
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 from zipfile import BadZipFile, ZipFile
 
 import httpx
+
+from boss_agent_cli.auth.manager import AuthRequired
 
 MAX_RESUME_BYTES = 20 * 1024 * 1024
 
@@ -67,7 +68,9 @@ def attachment_params(message: dict[str, Any]) -> dict[str, str]:
 
 
 def save_resume(response: httpx.Response, output: Path) -> dict[str, Any]:
-	"""限制大小、识别文件格式，再以私有权限原子落盘且不覆盖旧文件。"""
+	"""限制大小、识别文件格式，再以私有权限排他创建文件，不覆盖旧文件。"""
+	if response.status_code in (401, 403):
+		raise AuthRequired("附件下载认证失败，请重新登录后核对附件权限")
 	if response.status_code != 200:
 		raise ResumeValidationError("附件下载未返回文件（可能已失效、需登录或发生重定向）")
 	content = bytearray()
@@ -95,13 +98,16 @@ def save_resume(response: httpx.Response, output: Path) -> dict[str, Any]:
 		raise ResumeValidationError("响应不是支持的 PDF、Word 或图片附件，不保存登录页或错误内容")
 	if output.suffix.lower() not in suffixes:
 		raise ResumeValidationError(f"文件内容与输出扩展名不符，请使用 {suffixes[0]}")
-	# 不使用服务端文件名；硬链接发布保证并发下载也不会覆盖已有目标。
-	fd, name = tempfile.mkstemp(prefix=".boss-resume-", dir=output.parent)
-	temporary = Path(name)
+	# 不使用服务端文件名；排他创建避免覆盖，也兼容不支持硬链接的文件系统。
+	fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
 	try:
-		with os.fdopen(fd, "wb") as stream:
-			stream.write(content)
-		os.link(temporary, output)
-	finally:
-		temporary.unlink()
+		try:
+			with open(fd, "wb", closefd=False) as stream:
+				stream.write(content)
+		finally:
+			os.close(fd)
+	except BaseException:
+		# 关闭句柄后删除本次创建的未完成文件，兼容 Windows。
+		output.unlink(missing_ok=True)
+		raise
 	return {"path": str(output.absolute()), "bytes": len(content), "format": suffixes[0][1:]}
