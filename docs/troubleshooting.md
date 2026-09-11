@@ -139,6 +139,16 @@ if (-not $chrome) { throw "Google Chrome executable was not found" }
 boss --cdp-url http://localhost:9222 login --cdp
 ```
 
+`login --cdp` 会先扫描 CDP Chrome 中所有浏览器 context：若已存在带 BOSS 登录态
+（`wt2`）的 context，则直接复用它和既有 zhipin 页签，不导航登录页、不轮询等待；
+只在找不到登录态时才打开登录页扫码。页签清理只作用于本次调用新建的页面，
+用户已打开的页签不会被关闭。
+
+复用时会在终端打出选中的 context 序号与「账号指纹」（登录态 cookie 值的不可逆
+哈希前缀，不泄露 cookie 本身），例如 `context 2/2，账号指纹 c26a7f01`。同时开多个
+浏览器窗口/无痕页或多个 profile 各登不同 BOSS 账号时，复用的是「第一个带登录态的
+context」；若指纹对应的账号不是你要的，请关闭多余窗口或只保留目标账号的登录态后重试。
+
 ## 锁定浏览器通道：`--browser-source`
 
 `--browser-source stored-cookie --cdp-url <地址>` 是 fail-closed 的严格模式：把浏览器通道锁定为你指定的那个 CDP 端点并禁止降级到 Bridge 或 headless，不可用时立即返回 `CDP_UNAVAILABLE`。该端点可以是你日常 Chrome 的调试端口，也可以是长期复用的专用调试 profile——**它只保证「锁定通道」，不保证复用你日常浏览器的登录会话**。若你要的是后者，请用 `--browser-source existing-browser`。

@@ -24,13 +24,13 @@ _PLATFORM_BROWSER_CONFIG: dict[str, dict[str, str]] = {
 	"zhipin": {
 		"login_page_url": LOGIN_PAGE_URL,
 		"home_url": HOME_URL,
-		"cookie_domain": "zhipin",
+		"cookie_domain": "zhipin.com",
 		"success_cookie": "wt2",
 	},
 	"zhilian": {
 		"login_page_url": "https://rd6.zhaopin.com/app/im",
 		"home_url": "https://rd6.zhaopin.com/app/im",
-		"cookie_domain": "zhaopin",
+		"cookie_domain": "zhaopin.com",
 		"success_cookie": "at",
 	},
 }
@@ -64,11 +64,7 @@ def _extract_zhilian_client_id(page: Any) -> str:
 
 
 def _is_zhilian_url(url: str) -> bool:
-	host = urlparse(url).hostname
-	if host is None:
-		return False
-	host = host.rstrip(".").lower()
-	return host == _ZHILIAN_HOST or host.endswith(f".{_ZHILIAN_HOST}")
+	return _is_platform_url(url, _ZHILIAN_HOST)
 
 
 def _find_zhilian_recruiter_page(pages: list[Any]) -> Any | None:
@@ -80,6 +76,89 @@ def _find_zhilian_recruiter_page(pages: list[Any]) -> Any | None:
 		if _is_zhilian_url(getattr(page, "url", "")):
 			return page
 	return None
+
+
+_ZHIPIN_HOST = "zhipin.com"
+
+
+def _is_platform_url(url: str, expected_host: str) -> bool:
+	"""精确 hostname 校验：只接受该 host 及其子域，拒绝子串陷阱。"""
+	host = urlparse(url).hostname
+	if host is None:
+		return False
+	host = host.rstrip(".").lower()
+	return host == expected_host or host.endswith(f".{expected_host}")
+
+
+def _is_zhipin_url(url: str) -> bool:
+	return _is_platform_url(url, _ZHIPIN_HOST)
+
+
+def _find_zhipin_page(pages: list[Any]) -> Any | None:
+	for page in pages:
+		if _is_zhipin_url(getattr(page, "url", "")):
+			return page
+	return None
+
+
+def _is_cookie_domain(domain: str, expected_domain: str) -> bool:
+	normalized = domain.lstrip(".").rstrip(".").lower()
+	expected = expected_domain.lstrip(".").rstrip(".").lower()
+	return normalized == expected or normalized.endswith(f".{expected}")
+
+
+def _ensure_page_evaluable(page: Any) -> bool:
+	"""有界确认页面可对 ``page.evaluate``（停在未完成导航时 evaluate 会永久挂起，#390 规则）。
+
+	返回 True 表示已就绪（可安全 evaluate）；False 表示有界等待超时，调用方须容忍并跳过
+	页面提取。统一三处「有界 wait_for_load_state → 就绪门禁」的重复逻辑。
+	"""
+	try:
+		page.wait_for_load_state("domcontentloaded", timeout=_NAV_TIMEOUT_MS)
+	except Exception:
+		return False
+	return True
+
+
+def _matching_cookies(context: Any, *, cookie_domain: str) -> list[dict[str, Any]]:
+	try:
+		return [
+			cookie
+			for cookie in context.cookies()
+			if _is_cookie_domain(cookie.get("domain", ""), cookie_domain)
+		]
+	except Exception:
+		return []
+
+
+def _find_logged_in_context(
+	contexts: list[Any], *, cookie_domain: str, success_cookie: str
+) -> tuple[Any | None, int, str]:
+	"""跨所有 browser context 搜索非空成功 cookie。
+
+	返回 ``(匹配的 context, 其序号 index, 成功 cookie 的不可逆指纹)``；未命中返回
+	``(None, -1, "")``。指纹用于多 context 账号歧义时让用户区分选中的是哪个账号
+	（见 ``_account_fingerprint``）。cookie 一律由调用方在导航后重读，不在此处返回
+	早期快照，避免调用方误用过期值。
+	"""
+	for index, context in enumerate(contexts):
+		cookies = _matching_cookies(context, cookie_domain=cookie_domain)
+		for cookie in cookies:
+			if cookie.get("name") == success_cookie and cookie.get("value"):
+				return context, index, _account_fingerprint(cookie["value"])
+	return None, -1, ""
+
+
+def _account_fingerprint(cookie_value: str) -> str:
+	"""对登录态 cookie 值做不可逆指纹（SHA-256 前 8 位十六进制），用于账号区分。
+
+	zhipin 的 ``wt2`` 等成功 cookie 是加密 token，没有可直接展示的明文账号字段；
+	但同一账号的 cookie 值稳定、不同账号不同，故用哈希前缀作为「账号指纹」——
+	既能让用户在多 context 下区分选中的是不是目标账号，又不泄露 cookie 本身。
+	"""
+	import hashlib
+
+	return hashlib.sha256(cookie_value.encode("utf-8")).hexdigest()[:8]
 
 
 def _browser_diag(message: str) -> None:
@@ -157,54 +236,143 @@ def login_via_cdp(*, cdp_url: str | None = None, timeout: int = 120, platform: s
 	if not ws_url:
 		raise ConnectionError("CDP 不可用，请先运行 boss-chrome 启动带调试端口的 Chrome")
 
-	print("[boss] 正在 CDP Chrome 中打开登录页...", file=sys.stderr)
 	pw = sync_playwright().start()
 	browser = pw.chromium.connect_over_cdp(ws_url)
-	ctx = browser.contexts[0] if browser.contexts else browser.new_context()
-	page = _find_zhilian_recruiter_page(ctx.pages) if platform == "zhilian" else None
+	# 跨所有 browser context 搜索已有登录态：命中则复用该 context，不导航登录页
+	all_contexts = list(browser.contexts)
+	logged_in_ctx, ctx_index, ctx_account_fp = _find_logged_in_context(
+		all_contexts,
+		cookie_domain=cookie_domain,
+		success_cookie=success_cookie,
+	)
+	already_logged_in = logged_in_ctx is not None
+	ctx = logged_in_ctx or (browser.contexts[0] if browser.contexts else browser.new_context())
+	if already_logged_in and platform == "zhipin":
+		page = _find_zhipin_page(ctx.pages)
+	elif platform == "zhilian":
+		page = _find_zhilian_recruiter_page(ctx.pages)
+	else:
+		page = None
 	created_page = page is None
 	if page is None:
 		page = ctx.new_page()
 
 	try:
-		if created_page or platform != "zhilian":
-			try:
-				page.goto(
-					login_page_url,
-					wait_until="commit",
-					timeout=_NAV_TIMEOUT_MS,
+		if already_logged_in:
+			# 多 context 账号歧义：复用的是「第一个带登录态的 context」，选中哪个取决于
+			# browser.contexts 顺序，用户看不到也控制不了。打出 context 序号 + 账号指纹
+			# （cookie 值的不可逆哈希前缀），让用户能区分选中的是不是目标账号。
+			print(
+				f"[boss] 检测到 CDP Chrome 已登录，正在复用现有登录态"
+				f"（context {ctx_index + 1}/{len(all_contexts)}，账号指纹 {ctx_account_fp}）...",
+				file=sys.stderr,
+			)
+			if len(all_contexts) > 1:
+				print(
+					"[boss] 提示：检测到多个浏览器 context。若账号不符，请关闭多余窗口/"
+					"无痕页，或只保留目标账号的登录态后重试。",
+					file=sys.stderr,
 				)
-			except Exception:
-				pass
-
-		print(f"[boss] 请在 Chrome 中扫码登录，等待中...（超时 {timeout}s）", file=sys.stderr)
-
-		for i in range(timeout):
-			time.sleep(1)
-			cookies = ctx.cookies()
-			success = [c for c in cookies if c["name"] == success_cookie and cookie_domain in c.get("domain", "")]
-			if success:
-				print("[boss] 检测到登录成功！", file=sys.stderr)
-				break
-			if i > 0 and i % 15 == 0:
-				print(f"[boss] 等待中... {i}s", file=sys.stderr)
 		else:
-			raise TimeoutError(f"CDP 扫码登录超时（{timeout}s）")
+			print("[boss] 正在 CDP Chrome 中打开登录页...", file=sys.stderr)
+			# 智联复用用户已打开的 recruiter 页签时不导航（created_page=False），
+			# 避免把用户正在筛选候选人的页面 goto 走（review #406 第 2 条）。
+			if created_page or platform != "zhilian":
+				try:
+					page.goto(
+						login_page_url,
+						wait_until="commit",
+						timeout=_NAV_TIMEOUT_MS,
+					)
+				except Exception:
+					pass
 
-		# 在登录页（已加载）上先记录 UA，避免首页导航卡住后 evaluate 永久挂起
-		ua = _safe_user_agent(page)
-		if created_page or platform != "zhilian":
-			home_loaded = _warm_home_for_runtime(page, home_url, stage="登录后回到首页")
+			# 智联复用既有页签未登录时不导航（保护用户页面状态），页面上没有可见的扫码入口，
+			# 提示「扫码」会误导且轮询必然超时；改为引导用户在既有页签内手动完成登录，
+			# 轮询 at 保持不变——用户在页签里登录后轮询即可接上，超时也是真实的超时。
+			if platform == "zhilian" and not created_page:
+				print(f"[boss] 请在已打开的智联页签中完成登录，等待中...（超时 {timeout}s）", file=sys.stderr)
+			else:
+				print(f"[boss] 请在 Chrome 中扫码登录，等待中...（超时 {timeout}s）", file=sys.stderr)
+
+			for i in range(timeout):
+				time.sleep(1)
+				# 裸 ctx.cookies() 让异常传播：轮询中途 CDP target 死掉时立即报真实连接错误，
+				# 而不是被吞成 [] 继续空转到超时，误报成「扫码超时」（与最终读取同一规则）。
+				cookies = [
+					c for c in ctx.cookies() if _is_cookie_domain(c.get("domain", ""), cookie_domain)
+				]
+				if any(c.get("name") == success_cookie and c.get("value") for c in cookies):
+					print("[boss] 检测到登录成功！", file=sys.stderr)
+					break
+				if i > 0 and i % 15 == 0:
+					print(f"[boss] 等待中... {i}s", file=sys.stderr)
+			else:
+				raise TimeoutError(f"CDP 扫码登录超时（{timeout}s）")
+
+		# UA 采集按路径 gate：_safe_user_agent 内部是 page.evaluate，页面停在未完成
+		# 导航时会永久挂起（不抛异常），绝不能在导航卡住后调用（#390 规则）。
+		#
+		# page_ready 是「可对 page evaluate」的统一就绪门禁，覆盖所有复用既有页签
+		# （not created_page）的情况——无论预先登录还是扫码后登录。新建页签的就绪由
+		# _warm_home_for_runtime 的返回值 home_loaded 表达。
+		ua = ""
+		page_ready = False
+		if not already_logged_in:
+			# 未登录：登录页 goto 用 wait_until="commit"，不保证执行上下文就绪；扫码轮询
+			# 在 cookie 出现时即 break，页面可能仍在导航。采 UA 前做有界就绪确认，卡住则
+			# 容忍 UA 为空、不挂起。复用既有页签时（created_page=False）这里已确认就绪。
+			page_ready = _ensure_page_evaluable(page)
+			ua = _safe_user_agent(page) if page_ready else ""
+			if created_page or platform != "zhilian":
+				home_loaded = _warm_home_for_runtime(page, home_url, stage="登录后回到首页")
+			else:
+				home_loaded = True  # 智联复用页签：未导航，home_loaded 仅 zhipin 分支消费
+		elif created_page:
+			# 复用登录态但无既有平台页签：所有平台的新建页签都回各自 home
+			# （去掉 platform=="zhipin" 限制，否则 zhilian 新建页签停在 about:blank，
+			# _extract_zhilian_client_id 读 localStorage 必空 → TokenRefreshFailed）。
+			home_loaded = _warm_home_for_runtime(page, home_url, stage="复用登录态回首页")
+			page_ready = home_loaded
+			ua = _safe_user_agent(page) if home_loaded else ""
 		else:
-			home_loaded = True
-		all_cookies = {c["name"]: c["value"] for c in ctx.cookies() if cookie_domain in c.get("domain", "")}
+			# 复用既有平台页签（已预先登录）：不导航，避免打断用户页面；有界确认就绪后采 UA。
+			home_loaded = False
+			page_ready = _ensure_page_evaluable(page)
+			ua = _safe_user_agent(page) if page_ready else ""
+
+		# 任何导航之后重新读取 cookie，不依赖早期快照。这里是登录成功后的「最终读取」，
+		# 不能用吞异常的 _matching_cookies：ctx.cookies() 抛错（如 CDP target closed）若返回
+		# []，会被当作 cookies={} 的「成功」结果落盘（AuthManager.login 不校验主 cookie）。
+		# 故直接 ctx.cookies() 让异常传播，并读完后校验主 cookie 存在，否则 raise。
+		all_cookies = {
+			c["name"]: c["value"]
+			for c in ctx.cookies()
+			if _is_cookie_domain(c.get("domain", ""), cookie_domain)
+		}
+		if not all_cookies.get(success_cookie):
+			raise RuntimeError(
+				f"登录态校验失败：最终读取未拿到主 cookie（{success_cookie}），凭证不落盘"
+			)
 		if platform == "zhipin":
-			# 首页成功加载才对其 evaluate 提取 stoken；否则回退读取 cookie jar
-			stoken = _extract_stoken(page) if home_loaded else all_cookies.get("__zp_stoken__", "")
+			if created_page:
+				# 首页成功加载才对其 evaluate 提取 stoken；否则回退读取 cookie jar
+				stoken = _extract_stoken(page) if home_loaded else all_cookies.get("__zp_stoken__", "")
+			else:
+				# 复用既有页签：优先 cookie jar 的 stoken；缺失时仅页面就绪才提取。
+				stoken = all_cookies.get("__zp_stoken__", "")
+				if not stoken and page_ready:
+					stoken = _extract_stoken(page)
 		else:
 			stoken = ""
 		if platform == "zhilian":
-			x_zp_client_id = all_cookies.get("x-zp-client-id") or _extract_zhilian_client_id(page)
+			# cookie 里 x-zp-client-id 非空才直接用（空串也要落到 localStorage 兜底）；
+			# 复用既有页签需页面就绪，否则在卡住的页面上 evaluate 会永久挂起（同 #390）。
+			x_zp_client_id = all_cookies.get("x-zp-client-id") or ""
+			# 新建页签看 home_loaded（首页卡住时不对卡住页面 evaluate），复用既有页签看 page_ready；
+			# created_page 一短路就无视 home_loaded 会对卡住页面 evaluate 读 localStorage（同 #390 挂起）。
+			if not x_zp_client_id and (home_loaded if created_page else page_ready):
+				x_zp_client_id = _extract_zhilian_client_id(page)
 		else:
 			x_zp_client_id = ""
 
@@ -263,7 +431,10 @@ def login_via_browser(*, timeout: int = 120, platform: str = "zhipin") -> dict[s
 			# 也通过 cookie 检测（覆盖 API 匹配不上的情况）
 			try:
 				cookies_list = context.cookies()
-				if any(c["name"] == success_cookie and cookie_domain in c.get("domain", "") for c in cookies_list):
+				if any(
+					c["name"] == success_cookie and _is_cookie_domain(c.get("domain", ""), cookie_domain)
+					for c in cookies_list
+				):
 					login_detected = True
 					break
 			except Exception:
@@ -284,7 +455,9 @@ def login_via_browser(*, timeout: int = 120, platform: str = "zhipin") -> dict[s
 		home_loaded = _warm_home_for_runtime(page, home_url, stage="登录后回到首页")
 
 		cookies_list = context.cookies()
-		cookies = {c["name"]: c["value"] for c in cookies_list if cookie_domain in c.get("domain", "")}
+		cookies = {
+			c["name"]: c["value"] for c in cookies_list if _is_cookie_domain(c.get("domain", ""), cookie_domain)
+		}
 		if platform == "zhipin":
 			# 首页成功加载才对其 evaluate 提取 stoken；否则回退到 cookie jar，
 			# 避免页面卡在导航中导致 page.evaluate 永久挂起

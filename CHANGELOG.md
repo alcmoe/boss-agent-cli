@@ -28,6 +28,23 @@
   强制走浏览器通道获取职位卡片；既有 `job_card()` 的 httpx 优先行为完全不变。
 
 ### Fixed
+- **复用已登录 CDP 会话并消除首次导航竞态。** `login --cdp` 现在跨所有 browser context
+  按精确 hostname / cookie domain 校验搜索已有 BOSS 登录态（`wt2`/`at`）：命中时复用该
+  context 与既有平台页签，不导航登录页、不轮询等待；cookie 中已含 `__zp_stoken__` 时
+  优先读取 cookie jar，仅在缺失且页面经有界 `wait_for_load_state` 确认可加载后才做页面
+  提取。UA 采集按路径 gate：未登录时在已加载的登录页上提前采集（沿用 #390 顺序），复用
+  新建页签时在首页确认加载后采集，复用既有页签时与 stoken 共用同一次有界就绪检查——
+  导航卡住的页面 UA 与 stoken 都不会被 evaluate（避免 patchright 永久挂起）。清理时只
+  关闭本次调用新建的页面。智联未登录时复用既有 recruiter 页签不再被导航走；智联已登录
+  但无 recruiter 页签时新建页签也会回各自 home（修复 `x-zp-client-id` 在 about:blank 上
+  读取失效导致的 `TokenRefreshFailed`）。API 浏览器会话（`BrowserSession._try_connect`）
+  新建 CDP 页面改为等待 `domcontentloaded`，修复首次搜索出现 `execution context destroyed`
+  的竞态；并为该路径补「卡住不 evaluate」门禁——goto 超时不再被 `except` 吞掉后直接
+  `return True`，而是标记 `_page_ready=False`，`request()` 在 `evaluate(fetch)` 前先做有界
+  `wait_for_load_state` 恢复，仍不就绪则返回错误信封而非永久挂起（与 #390 同一规则）。
+  多 context 复用时在终端打出选中的 context 序号与「账号指纹」（登录态 cookie 值的不可逆
+  哈希前缀，不泄露 cookie），缓解多窗口/多 profile 下的账号歧义。#390 的导航超时/重试、
+  `_safe_user_agent`、`_warm_home_for_runtime` 与 cookie-jar 兜底全部保留。
 - **风控类异常在三个执行器中的终止语义收敛（Issue #419）。** `AccountRiskError` / `EnvironmentRiskError`
   现在共享基类 `PlatformRiskError`（带稳定 `code`），新增风控码只需登记子类。此前三处执行器会反转或吞掉终止语义：
   福利筛选线程池的 `except Exception` 会吞掉浏览器通道抛出的风控异常并继续扫描整页；`batch-greet` 靠

@@ -147,6 +147,19 @@ Then log in via CDP from another terminal:
 boss --cdp-url http://localhost:9222 login --cdp
 ```
 
+`login --cdp` first scans every browser context in the CDP Chrome: if a context already
+holds a BOSS login session (`wt2`), it reuses that context and its existing zhipin tab
+directly — no login-page navigation, no polling. It only opens the login page for QR
+scanning when no existing login is found. Tab cleanup applies only to pages created by
+this call; tabs you already have open are never closed.
+
+When reusing a session, the terminal prints the chosen context index and an "account
+fingerprint" (an irreversible hash prefix of the login cookie value — the cookie itself
+is never shown), e.g. `context 2/2, account fingerprint c26a7f01`. With multiple browser
+windows / incognito pages, or several profiles each logged into a different BOSS account,
+the reused context is the first one holding a login session. If the fingerprint is not the
+account you want, close the extra windows or keep only the target account logged in, then retry.
+
 ## Locking the browser channel: `--browser-source`
 
 `--browser-source stored-cookie --cdp-url <addr>` is a fail-closed strict mode: it locks the browser channel to the exact CDP endpoint you specify and forbids falling back to Bridge or headless, returning `CDP_UNAVAILABLE` immediately when unavailable. The endpoint can be your daily Chrome's debug port or a long-lived dedicated debug profile — **it only guarantees "locked channel", not reuse of your daily browser's login session**. For the latter, use `--browser-source existing-browser`.
