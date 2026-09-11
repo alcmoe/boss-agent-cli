@@ -16,6 +16,15 @@
 - `boss login --curl-file` 支持从浏览器 cURL 文本导入 BOSS 登录态，验证后复用原生加密存储，不执行原请求或保存业务请求体。
 - 招聘者模式新增推荐牛人完整卡片和需明确批准的首次招呼；使用单次直连请求及候选人／职位原子防重，不建立 MQTT 连接或发送已读回执。
 - 新增 `hr accept-resume` / `hr download-resume` 及对应 MCP 工具：核对候选人与消息后同意请求，检查权限并下载已收到附件；复用原生认证，不自动重试写请求、不覆盖已有文件。
+- **公开 `--browser-source` 浏览器来源选项**（取值 `auto` / `existing-browser` / `stored-cookie`，默认
+  `auto` 行为不变）。`stored-cookie` 为 fail-closed 严格模式：只连接 `--cdp-url` 指定的 CDP 端点，
+  不自动探测 `localhost:9222`/`DevToolsActivePort`、不降级 Bridge/headless、空浏览器不新建 context
+  注入 Cookie，不可用即发 `CDP_UNAVAILABLE`；`existing-browser` 只复用现有浏览器（Bridge/CDP），
+  不读本地凭据、不启动浏览器，失败发 `BROWSER_SESSION_NOT_FOUND`。stoken 静默刷新同样遵守该策略
+  （#418）。CLI / config / `boss schema` / MCP / wizard 全链路透传；`schema` 的 `global_options`
+  声明该选项并标注 `stability: experimental`，输出带 `current_browser_source`。非 `auto` 来源用于
+  无浏览器通道的平台（zhilian/qiancheng/51job）时返回 `NOT_SUPPORTED`。由 @iqjiy 提出并发现相关问题，
+  策略表与契约见 Issue #387 / PR #410。
 - **公开职位 lid 与浏览器职位卡片接口。** `JobItem` 新增 `lid` 字段（解析自列表响应
   `raw.lid`，缺失时为空串，并随 `to_dict()` 序列化）——取 JD 全文需要 `securityId` + `lid`
   两个参数，此前走 CLI 的调用方拿不到 `lid`。`BossClient` 新增 `job_card_browser(security_id, lid)`，
@@ -26,6 +35,23 @@
 - 附件下载的登录与网络错误采用 schema 恢复指引，二进制 HTTP 401/403 映射为 `AUTH_REQUIRED`；以排他创建替代硬链接落盘，保留不覆盖与写入失败清理，补齐推荐牛人 CLI 成功和失败测试。
 - 修复招聘者首次招呼将 `code=0` 的权益拦截页误判为成功：识别开聊业务拒绝，返回 `GREET_LIMIT`、`sent=false` 及脱敏平台提示；保留拒绝状态并阻止重复发送，不影响其他端点的成功判断。
 - 招聘者招呼与附件操作保留登录失效、令牌刷新失败和账号风控分类，未知发送结果停止重试；最近消息未知未读数不覆盖会话真实计数，支持 `lastMsgInfo.showText`。
+- **复用已登录 CDP 会话并消除首次导航竞态。** `login --cdp` 现在跨所有 browser context
+  按精确 hostname / cookie domain 校验搜索已有 BOSS 登录态（`wt2`/`at`）：命中时复用该
+  context 与既有平台页签，不导航登录页、不轮询等待；cookie 中已含 `__zp_stoken__` 时
+  优先读取 cookie jar，仅在缺失且页面经有界 `wait_for_load_state` 确认可加载后才做页面
+  提取。UA 采集按路径 gate：未登录时在已加载的登录页上提前采集（沿用 #390 顺序），复用
+  新建页签时在首页确认加载后采集，复用既有页签时与 stoken 共用同一次有界就绪检查——
+  导航卡住的页面 UA 与 stoken 都不会被 evaluate（避免 patchright 永久挂起）。清理时只
+  关闭本次调用新建的页面。智联未登录时复用既有 recruiter 页签不再被导航走；智联已登录
+  但无 recruiter 页签时新建页签也会回各自 home（修复 `x-zp-client-id` 在 about:blank 上
+  读取失效导致的 `TokenRefreshFailed`）。API 浏览器会话（`BrowserSession._try_connect`）
+  新建 CDP 页面改为等待 `domcontentloaded`，修复首次搜索出现 `execution context destroyed`
+  的竞态；并为该路径补「卡住不 evaluate」门禁——goto 超时不再被 `except` 吞掉后直接
+  `return True`，而是标记 `_page_ready=False`，`request()` 在 `evaluate(fetch)` 前先做有界
+  `wait_for_load_state` 恢复，仍不就绪则返回错误信封而非永久挂起（与 #390 同一规则）。
+  多 context 复用时在终端打出选中的 context 序号与「账号指纹」（登录态 cookie 值的不可逆
+  哈希前缀，不泄露 cookie），缓解多窗口/多 profile 下的账号歧义。#390 的导航超时/重试、
+  `_safe_user_agent`、`_warm_home_for_runtime` 与 cookie-jar 兜底全部保留。
 - **风控类异常在三个执行器中的终止语义收敛（Issue #419）。** `AccountRiskError` / `EnvironmentRiskError`
   现在共享基类 `PlatformRiskError`（带稳定 `code`），新增风控码只需登记子类。此前三处执行器会反转或吞掉终止语义：
   福利筛选线程池的 `except Exception` 会吞掉浏览器通道抛出的风控异常并继续扫描整页；`batch-greet` 靠
